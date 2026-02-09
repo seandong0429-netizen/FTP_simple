@@ -1,0 +1,46 @@
+name: Build FTP Server
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Build with PyInstaller (Windows)
+      if: runner.os == 'Windows'
+      run: |
+        pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Server_Win" --hidden-import=zeroconf main.py
+
+    - name: Build with PyInstaller (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        pyinstaller --noconfirm --onefile --windowed --name "FTP_Simple_Server_Mac" --hidden-import=zeroconf main.py
+
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: FTP_Server_Build_${{ matrix.os }}
+        path: dist/

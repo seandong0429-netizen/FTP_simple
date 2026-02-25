@@ -392,4 +392,7 @@ def main():
     root.mainloop()
 
 if __name__ == "__main__":
+    import multiprocessing
+    # 修复 Windows 下打包成 exe 后可能由于第三方库触发多进程而导致的无限重启（Fork 炸弹）问题
+    multiprocessing.freeze_support()
     main()

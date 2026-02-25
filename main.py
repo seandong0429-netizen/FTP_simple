@@ -46,17 +46,23 @@ class SimpleFTPServer:
     def log(self, message):
         self.logger_func(message)
 
-    def start_service(self, folder, port=21, encoding='utf-8'):
+    def start_service(self, folder, port=21, encoding='utf-8', use_auth=False, username='', password=''):
         if not os.path.isdir(folder):
             self.log(f"错误: 路径不存在 -> {folder}")
             return False
 
         # 1. FTP Core Configuration
         authorizer = DummyAuthorizer()
-        # Default anonymous read/write (as requested for "sharing")
-        # perm="elradfmw":
-        # e-change directory, l-list, r-retrieve, a-append, d-delete, f-rename, m-make dir, w-store
-        authorizer.add_anonymous(folder, perm="elradfmw")
+        # perm="elradfmw": e-change directory, l-list, r-retrieve, a-append, d-delete, f-rename, m-make dir, w-store
+        if use_auth:
+            if not username or not password:
+                self.log("错误: 启用密码验证时，账号和密码不能为空")
+                return False
+            authorizer.add_user(username, password, folder, perm="elradfmw")
+            self.log(f"已启用密码验证 (账号: {username})")
+        else:
+            authorizer.add_anonymous(folder, perm="elradfmw")
+            self.log("已启用匿名访问 (无需密码)")
         
         handler = FTPHandler
         handler.authorizer = authorizer
@@ -207,6 +213,30 @@ class FTPApp:
         else:
             ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5,0))
 
+        # Auth Configuration
+        self.use_auth_var = tk.BooleanVar(value=False)
+        self.username_var = tk.StringVar(value="admin")
+        self.password_var = tk.StringVar(value="123456")
+        
+        auth_frame = ttk.Frame(opts_frame)
+        auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5,0))
+        
+        self.cb_auth = ttk.Checkbutton(auth_frame, text="启用访问密码", variable=self.use_auth_var, command=self.toggle_auth_ui)
+        self.cb_auth.pack(anchor=tk.W)
+        
+        self.auth_input_frame = ttk.Frame(auth_frame)
+        
+        ttk.Label(self.auth_input_frame, text="账号:").pack(side=tk.LEFT)
+        self.entry_user = ttk.Entry(self.auth_input_frame, textvariable=self.username_var, width=10)
+        self.entry_user.pack(side=tk.LEFT, padx=(0,5))
+        
+        ttk.Label(self.auth_input_frame, text="密码:").pack(side=tk.LEFT)
+        self.entry_pass = ttk.Entry(self.auth_input_frame, textvariable=self.password_var, width=10)
+        self.entry_pass.pack(side=tk.LEFT)
+        
+        # Initialize hidden
+        self.toggle_auth_ui()
+
         # Right side: Big Start Button
         self.btn_start = ttk.Button(ctrl_frame, text="启动服务", style="Big.TButton", command=self.toggle_service)
         self.btn_start.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0), ipadx=20)
@@ -222,6 +252,12 @@ class FTPApp:
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+    def toggle_auth_ui(self):
+        if self.use_auth_var.get():
+            self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2,0))
+        else:
+            self.auth_input_frame.pack_forget()
 
     def browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.path_var.get())
@@ -242,6 +278,9 @@ class FTPApp:
             # Start
             folder = self.path_var.get()
             encoding = self.encoding_var.get()
+            use_auth = self.use_auth_var.get()
+            username = self.username_var.get()
+            password = self.password_var.get()
             
             try:
                 port = int(self.port_var.get())
@@ -253,14 +292,18 @@ class FTPApp:
             if sys.platform == 'win32':
                 self.configure_firewall()
 
-            self.log_message(f"--- 尝试启动 (端口: {port}, 编码: {encoding}) ---")
-            success = self.ftp_server.start_service(folder, port=port, encoding=encoding)
+            auth_status = '启用' if use_auth else '关闭'
+            self.log_message(f"--- 尝试启动 (端口: {port}, 编码: {encoding}, 密码验证: {auth_status}) ---")
+            success = self.ftp_server.start_service(folder, port=port, encoding=encoding, use_auth=use_auth, username=username, password=password)
             
             if success:
                 self.is_running = True
                 self.btn_start.configure(text="停止服务")
                 self.status_var.set("状态: 运行中")
                 self.entry_port.configure(state='disabled') # Lock port while running
+                self.entry_user.configure(state='disabled')
+                self.entry_pass.configure(state='disabled')
+                self.cb_auth.configure(state='disabled')
                 # Disable options while running
                 # (Optional: disable encoding radio buttons)
             else:
@@ -272,6 +315,9 @@ class FTPApp:
             self.btn_start.configure(text="启动服务")
             self.status_var.set("状态: 已停止")
             self.entry_port.configure(state='normal') # Unlock port
+            self.entry_user.configure(state='normal')
+            self.entry_pass.configure(state='normal')
+            self.cb_auth.configure(state='normal')
 
     def configure_firewall(self):
         """Execute netsh commands to allow port 21 and passive ports"""
@@ -384,7 +430,7 @@ class FTPApp:
 def main():
     root = tk.Tk()
     root.title("云铠文件共享服务 v2.0")
-    root.geometry("600x450")
+    root.geometry("600x500")
     # Try to set icon if exists (optional)
     # root.iconbitmap('icon.ico') 
     

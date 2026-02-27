@@ -70,18 +70,14 @@ class SimpleFTPServer:
         # Passive ports range for firewall configuration consistency
         handler.passive_ports = range(60000, 60100)
         
-        # 2. Start Dual Stack Listener (IPv6 '::' usually covers IPv4 too)
+        # 2. 启动服务监听
+        # 强制绑定 IPv4 '0.0.0.0'，因为 Python 在 Windows 默认的 '::' 绑定是纯 IPv6，
+        # 会导致局域网内的传统设备（如复印机）无法通过 IPv4 地址访问。
         try:
-            # On Windows, '::' listens on both IPv4 and IPv6 if dual-stack is enabled (default)
-            # On some systems, we might need to handle address family explicitly, but pyftpdlib handles it well.
-            self.server = FTPServer(('::', port), handler)
-        except OSError as e:
-            self.log(f"绑定 ipv6 '::' 失败，尝试仅绑定 ipv4 '0.0.0.0': {e}")
-            try:
-                self.server = FTPServer(('0.0.0.0', port), handler)
-            except Exception as e2:
-                self.log(f"启动失败 (端口占用?): {e2}")
-                return False
+            self.server = FTPServer(('0.0.0.0', port), handler)
+        except Exception as e:
+            self.log(f"启动服务失败 (端口被占用或无权限): {e}")
+            return False
 
         self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.server_thread.start()

@@ -104,10 +104,24 @@ class SimpleFTPServer:
         self.log(f"编码: {encoding}")
         self.log(f"主机名访问: ftp://{hostname}.local:{port}/ (推荐)")
         
-        local_ip_v4 = self.get_local_ip()
-        self.log(f"IPv4 访问 : ftp://{local_ip_v4}:{port}/")
+        # 获取真实 IP 列表展示给用户
+        v4_list, v6_list = self.get_all_ips()
+        
+        if not v4_list:
+            v4_list = [self.get_local_ip()]
+            
+        for ip in v4_list:
+            self.log(f"IPv4 可用 : ftp://{ip}:{port}/")
+            
         if self.server_v6:
-            self.log(f"IPv6 访问 : 支持复印机输入 fe80::... 等 IPv6 链接地址")
+            if v6_list:
+                for ip in v6_list:
+                    # Windows 文件管理器访问 IPv6 需要特殊格式: [ipv6_address]
+                    # 不过复印机后台往往只需要裸的 ipv6 地址
+                    clean_ip = ip.split('%')[0] if '%' in ip else ip
+                    self.log(f"IPv6 可用 : {clean_ip}")
+            else:
+                self.log(f"IPv6 访问 : 服务已开启，但未能自动获取到网卡 IPv6 地址，请查看系统网络信息。")
         
         # 3. mDNS (.local) Broadcast
         self.start_mdns(port)
@@ -150,6 +164,25 @@ class SimpleFTPServer:
                 return socket.gethostbyname(socket.gethostname())
             except Exception:
                 return "127.0.0.1"
+
+    def get_all_ips(self):
+        v4_ips = set()
+        v6_ips = set()
+        try:
+            # 获取本机所有地址信息
+            addr_infos = socket.getaddrinfo(socket.gethostname(), None)
+            for info in addr_infos:
+                family, _, _, _, sockaddr = info
+                ip = sockaddr[0]
+                if family == socket.AF_INET and not ip.startswith("127."):
+                    v4_ips.add(ip)
+                elif family == socket.AF_INET6 and not ip.startswith("::1"):
+                    # 如果 IPv6 包含作用域 (即 %xxx)，我们可以选择展示它或者截断
+                    v6_ips.add(ip)
+        except Exception as e:
+            self.log(f"获取网卡 IP 失败: {e}")
+        
+        return list(v4_ips), list(v6_ips)
 
     def stop_service(self):
         if self.server_v4 or self.server_v6:

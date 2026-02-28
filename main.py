@@ -119,7 +119,10 @@ class SimpleFTPServer:
                     # Windows 文件管理器访问 IPv6 需要特殊格式: [ipv6_address]
                     # 不过复印机后台往往只需要裸的 ipv6 地址
                     clean_ip = ip.split('%')[0] if '%' in ip else ip
-                    self.log(f"IPv6 可用 : {clean_ip}")
+                    if clean_ip.lower().startswith("fe80"):
+                        self.log(f"IPv6 本地链接 : {clean_ip} (部分复印机不支持 fe80 开头的地址)")
+                    else:
+                        self.log(f"IPv6 局域网络 : {clean_ip} (👉 推荐复印机使用)")
             else:
                 self.log(f"IPv6 访问 : 服务已开启，但未能自动获取到网卡 IPv6 地址，请查看系统网络信息。")
         

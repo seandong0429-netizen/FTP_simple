@@ -39,7 +39,8 @@ class TextHandler(logging.Handler):
 class SimpleFTPServer:
     def __init__(self, logger_func):
         self.logger_func = logger_func
-        self.server = None
+        self.server_v4 = None
+        self.server_v6 = None
         self.zeroconf = None
         self.server_thread = None
 
@@ -70,23 +71,43 @@ class SimpleFTPServer:
         # Passive ports range for firewall configuration consistency
         handler.passive_ports = range(60000, 60100)
         
-        # 2. 启动服务监听
-        # 强制绑定 IPv4 '0.0.0.0'，因为 Python 在 Windows 默认的 '::' 绑定是纯 IPv6，
-        # 会导致局域网内的传统设备（如复印机）无法通过 IPv4 地址访问。
+        # 2. 启动服务监听 (IPv4 + IPv6 双栈)
         try:
-            self.server = FTPServer(('0.0.0.0', port), handler)
+            self.server_v4 = FTPServer(('0.0.0.0', port), handler)
         except Exception as e:
-            self.log(f"启动服务失败 (端口被占用或无权限): {e}")
+            self.log(f"启动 IPv4 服务失败 (端口被占用或无权限): {e}")
             return False
 
-        self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        try:
+            # 手动创建 IPv6 Socket 并开启 IPV6_V6ONLY = 1，避免与 0.0.0.0 冲突
+            sock_v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            try:
+                sock_v6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            except (AttributeError, OSError):
+                pass
+            sock_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock_v6.bind(('::', port))
+            sock_v6.listen(5)
+            self.server_v6 = FTPServer(sock_v6, handler)
+        except Exception as e:
+            self.log(f"提示: 本机 IPv6 监听未开启或不支持 ({e})，仅使用 IPv4。")
+            self.server_v6 = None
+
+        # 因为 pyftpdlib 默认共用 IOLoop，只要调用其中一个 serve_forever，
+        # 就会同时处理 server_v4 和 server_v6 的请求。
+        self.server_thread = threading.Thread(target=self.server_v4.serve_forever, daemon=True)
         self.server_thread.start()
         
         hostname = socket.gethostname()
-        self.log(f"FTP 服务已启动")
+        self.log(f"FTP 服务已启动 (支持局域网 IPv4 与 IPv6 连接)")
         self.log(f"本地路径: {folder}")
         self.log(f"编码: {encoding}")
-        self.log(f"访问地址 (推荐): ftp://{hostname}.local:{port}/")
+        self.log(f"主机名访问: ftp://{hostname}.local:{port}/ (推荐)")
+        
+        local_ip_v4 = self.get_local_ip()
+        self.log(f"IPv4 访问 : ftp://{local_ip_v4}:{port}/")
+        if self.server_v6:
+            self.log(f"IPv6 访问 : 支持复印机输入 fe80::... 等 IPv6 链接地址")
         
         # 3. mDNS (.local) Broadcast
         self.start_mdns(port)
@@ -131,10 +152,20 @@ class SimpleFTPServer:
                 return "127.0.0.1"
 
     def stop_service(self):
-        if self.server:
+        if self.server_v4 or self.server_v6:
             self.log("正在停止 FTP 服务...")
-            self.server.close_all()
-            self.server = None
+            if self.server_v4:
+                try:
+                    self.server_v4.close_all()
+                except Exception:
+                    pass
+                self.server_v4 = None
+            if self.server_v6:
+                try:
+                    self.server_v6.close_all()
+                except Exception:
+                    pass
+                self.server_v6 = None
         
         if self.zeroconf:
             self.log("正在停止 mDNS 广播...")

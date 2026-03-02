@@ -8,6 +8,11 @@ import subprocess
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
 
+# --- Tray imports ---
+import pystray
+from PIL import Image, ImageDraw
+import threading
+
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
@@ -214,7 +219,12 @@ class FTPApp:
         self.root = root
         self.ftp_server = SimpleFTPServer(self.log_message)
         self.is_running = False
+        self.tray_icon = None
+        
         self.setup_ui()
+        
+        # 拦截点击右上角 X 关闭窗口的事件，改为最小化到托盘
+        self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
         
         # Auto-configure firewall on Windows startup
         if sys.platform == 'win32':
@@ -307,8 +317,10 @@ class FTPApp:
         log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, state='disabled', font=("Consolas", 9))
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        # 允许鼠标选择和复制，但禁止键盘输入输入内容
+        self.log_text.bind("<Key>", lambda e: "break" if e.state != 4 and e.state != 8 and e.keysym not in ("c", "C") else None)
 
         # 4. Footer / Status
         self.status_var = tk.StringVar(value="就绪")
@@ -330,10 +342,8 @@ class FTPApp:
         self.root.after(0, lambda: self._append_log(msg))
 
     def _append_log(self, msg):
-        self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, f"{msg}\n")
         self.log_text.see(tk.END)
-        self.log_text.configure(state='disabled')
 
     def toggle_service(self):
         if not self.is_running:
@@ -488,6 +498,38 @@ class FTPApp:
             self.log_message(f"修改开机自启失败: {e}")
             # Revert checkbox if failed
             self.startup_var.set(not is_checked)
+
+    # --- System Tray Functions ---
+    def hide_window(self):
+        self.root.withdraw()
+        if not self.tray_icon:
+            # Create a simple icon (e.g., a blue square) if no external ico file exists
+            image = Image.new('RGB', (64, 64), color=(0, 122, 204))
+            draw = ImageDraw.Draw(image)
+            draw.text((10, 20), "FTP", fill=(255, 255, 255))
+            
+            menu = pystray.Menu(
+                pystray.MenuItem('显示窗口', self.show_window, default=True),
+                pystray.MenuItem('退出', self.quit_app)
+            )
+            self.tray_icon = pystray.Icon("FTP_Server", image, "云铠文件共享服务", menu)
+            
+            # Run tray icon in a separate thread so it doesn't block tkinter's mainloop
+            threading.Thread(target=self.tray_icon.run, daemon=True).start()
+
+    def show_window(self, icon=None, item=None):
+        if self.tray_icon:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.root.deiconify()
+
+    def quit_app(self, icon=None, item=None):
+        if self.tray_icon:
+            self.tray_icon.stop()
+        self.ftp_server.stop_service()
+        self.root.quit()
+        self.root.destroy()
+        sys.exit()
 
 def main():
     root = tk.Tk()

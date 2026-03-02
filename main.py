@@ -5,6 +5,7 @@ import threading
 import logging
 import platform
 import subprocess
+import json
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
 
@@ -229,6 +230,10 @@ class FTPApp:
         self.is_running = False
         self.tray_icon = None
         
+        # 配置文件路径
+        self.config_file = os.path.join(os.path.expanduser("~"), ".ftp_simple_config.json")
+        self.config = self.load_config()
+        
         # 日志性能缓冲队列
         self.log_buffer = []
         self.log_flush_scheduled = False
@@ -256,11 +261,14 @@ class FTPApp:
         path_frame.pack(fill=tk.X, padx=10, pady=5)
         
         self.path_var = tk.StringVar()
-        # Default to Desktop or Home
-        default_path = os.path.join(os.path.expanduser("~"), "Desktop")
-        if not os.path.exists(default_path):
-             default_path = os.path.expanduser("~")
+        default_path = self.config.get("folder", "")
+        if not default_path or not os.path.exists(default_path):
+            default_path = os.path.join(os.path.expanduser("~"), "Desktop")
+            if not os.path.exists(default_path):
+                 default_path = os.path.expanduser("~")
         self.path_var.set(default_path)
+        # 绑定值变化以便实时保存
+        self.path_var.trace_add("write", lambda *args: self.save_config())
         
         entry = ttk.Entry(path_frame, textvariable=self.path_var)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
@@ -277,7 +285,8 @@ class FTPApp:
         opts_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
         
         # Encoding Toggle
-        self.encoding_var = tk.StringVar(value="utf-8")
+        self.encoding_var = tk.StringVar(value=self.config.get("encoding", "utf-8"))
+        self.encoding_var.trace_add("write", lambda *args: self.save_config())
         ttk.Radiobutton(opts_frame, text="通用模式 (UTF-8)", variable=self.encoding_var, value="utf-8").pack(anchor=tk.W)
         ttk.Radiobutton(opts_frame, text="兼容模式 (GBK)", variable=self.encoding_var, value="gbk").pack(anchor=tk.W)
 
@@ -285,7 +294,8 @@ class FTPApp:
         port_frame = ttk.Frame(opts_frame)
         port_frame.pack(anchor=tk.W, pady=(5,0))
         ttk.Label(port_frame, text="端口:").pack(side=tk.LEFT)
-        self.port_var = tk.StringVar(value="21")
+        self.port_var = tk.StringVar(value=str(self.config.get("port", "21")))
+        self.port_var.trace_add("write", lambda *args: self.save_config())
         self.entry_port = ttk.Entry(port_frame, textvariable=self.port_var, width=6)
         self.entry_port.pack(side=tk.LEFT, padx=5)
         
@@ -298,9 +308,13 @@ class FTPApp:
             ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5,0))
 
         # Auth Configuration
-        self.use_auth_var = tk.BooleanVar(value=False)
-        self.username_var = tk.StringVar(value="admin")
-        self.password_var = tk.StringVar(value="123456")
+        self.use_auth_var = tk.BooleanVar(value=self.config.get("use_auth", False))
+        self.username_var = tk.StringVar(value=self.config.get("username", "admin"))
+        self.password_var = tk.StringVar(value=self.config.get("password", "123456"))
+        
+        self.use_auth_var.trace_add("write", lambda *args: self.save_config())
+        self.username_var.trace_add("write", lambda *args: self.save_config())
+        self.password_var.trace_add("write", lambda *args: self.save_config())
         
         auth_frame = ttk.Frame(opts_frame)
         auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5,0))
@@ -344,6 +358,33 @@ class FTPApp:
             self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2,0))
         else:
             self.auth_input_frame.pack_forget()
+
+    def load_config(self):
+        try:
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception as e:
+            self.log_message(f"加载配置文件失败: {e}")
+        return {}
+        
+    def save_config(self):
+        # 遇到正在初始化时由于变量未挂载可能报错，用 getattr 防御
+        if not hasattr(self, 'path_var'): return
+        
+        data = {
+            "folder": self.path_var.get(),
+            "encoding": self.encoding_var.get(),
+            "port": self.port_var.get(),
+            "use_auth": self.use_auth_var.get(),
+            "username": self.username_var.get(),
+            "password": self.password_var.get()
+        }
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.path_var.get())

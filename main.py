@@ -267,8 +267,6 @@ class FTPApp:
             if not os.path.exists(default_path):
                  default_path = os.path.expanduser("~")
         self.path_var.set(default_path)
-        # 绑定值变化以便实时保存
-        self.path_var.trace_add("write", lambda *args: self.save_config())
         
         entry = ttk.Entry(path_frame, textvariable=self.path_var)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
@@ -286,7 +284,6 @@ class FTPApp:
         
         # Encoding Toggle
         self.encoding_var = tk.StringVar(value=self.config.get("encoding", "utf-8"))
-        self.encoding_var.trace_add("write", lambda *args: self.save_config())
         ttk.Radiobutton(opts_frame, text="通用模式 (UTF-8)", variable=self.encoding_var, value="utf-8").pack(anchor=tk.W)
         ttk.Radiobutton(opts_frame, text="兼容模式 (GBK)", variable=self.encoding_var, value="gbk").pack(anchor=tk.W)
 
@@ -295,7 +292,6 @@ class FTPApp:
         port_frame.pack(anchor=tk.W, pady=(5,0))
         ttk.Label(port_frame, text="端口:").pack(side=tk.LEFT)
         self.port_var = tk.StringVar(value=str(self.config.get("port", "21")))
-        self.port_var.trace_add("write", lambda *args: self.save_config())
         self.entry_port = ttk.Entry(port_frame, textvariable=self.port_var, width=6)
         self.entry_port.pack(side=tk.LEFT, padx=5)
         
@@ -311,10 +307,6 @@ class FTPApp:
         self.use_auth_var = tk.BooleanVar(value=self.config.get("use_auth", False))
         self.username_var = tk.StringVar(value=self.config.get("username", "admin"))
         self.password_var = tk.StringVar(value=self.config.get("password", "123456"))
-        
-        self.use_auth_var.trace_add("write", lambda *args: self.save_config())
-        self.username_var.trace_add("write", lambda *args: self.save_config())
-        self.password_var.trace_add("write", lambda *args: self.save_config())
         
         auth_frame = ttk.Frame(opts_frame)
         auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5,0))
@@ -353,6 +345,14 @@ class FTPApp:
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
+        # 绑定所有变量的值变化监听以便实时保存配置
+        self.path_var.trace_add("write", lambda *args: self.save_config())
+        self.encoding_var.trace_add("write", lambda *args: self.save_config())
+        self.port_var.trace_add("write", lambda *args: self.save_config())
+        self.use_auth_var.trace_add("write", lambda *args: self.save_config())
+        self.username_var.trace_add("write", lambda *args: self.save_config())
+        self.password_var.trace_add("write", lambda *args: self.save_config())
+        
     def toggle_auth_ui(self):
         if self.use_auth_var.get():
             self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2,0))

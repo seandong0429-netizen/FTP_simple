@@ -140,21 +140,29 @@ class SimpleFTPServer:
             self.zeroconf = Zeroconf()
             hostname = socket.gethostname()
             # Try to find the real LAN IP
+            v4_ips, v6_ips = self.get_all_ips()
             local_ip = self.get_local_ip()
             
+            # Remove scope IDs from IPv6 for Zeroconf parsed_addresses compatibility
+            clean_v6_ips = [ip.split('%')[0] for ip in v6_ips]
+            all_ips_str = v4_ips + clean_v6_ips
+            if not all_ips_str:
+                all_ips_str = [local_ip]
+
             desc = {'path': '/'}
             info = ServiceInfo(
                 "_ftp._tcp.local.",
                 f"{hostname}._ftp._tcp.local.",
                 addresses=[socket.inet_aton(local_ip)],
+                parsed_addresses=all_ips_str,
                 port=port,
                 properties=desc,
                 server=f"{hostname}.local.",
             )
             self.zeroconf.register_service(info)
-            self.log(f"mDNS 广播已激活: {hostname}.local -> {local_ip}")
+            self.log(f"mDNS 广播已激活: {hostname}.local (已注册 IPv4 与 IPv6 节点)")
         except Exception as e:
-            self.log(f"mDNS 广播启动失败: {e}")
+            self.log(f"mDNS 广播启动失败 (版本不支持全节点广或者端口占用): {e}")
 
     def get_local_ip(self):
         try:
@@ -220,6 +228,10 @@ class FTPApp:
         self.ftp_server = SimpleFTPServer(self.log_message)
         self.is_running = False
         self.tray_icon = None
+        
+        # 日志性能缓冲队列
+        self.log_buffer = []
+        self.log_flush_scheduled = False
         
         self.setup_ui()
         
@@ -342,7 +354,21 @@ class FTPApp:
         self.root.after(0, lambda: self._append_log(msg))
 
     def _append_log(self, msg):
-        self.log_text.insert(tk.END, f"{msg}\n")
+        self.log_buffer.append(f"{msg}\n")
+        if not self.log_flush_scheduled:
+            self.log_flush_scheduled = True
+            self.root.after(200, self._flush_log_buffer)
+
+    def _flush_log_buffer(self):
+        if not self.log_buffer:
+            self.log_flush_scheduled = False
+            return
+        
+        texts = "".join(self.log_buffer)
+        self.log_buffer.clear()
+        self.log_flush_scheduled = False
+        
+        self.log_text.insert(tk.END, texts)
         self.log_text.see(tk.END)
 
     def toggle_service(self):
@@ -358,6 +384,24 @@ class FTPApp:
                 port = int(self.port_var.get())
             except ValueError:
                 self.log_message("错误: 端口必须是数字")
+                return
+
+            # 写入权限校验
+            if not os.access(folder, os.W_OK):
+                messagebox.showwarning("权限提示", f"程序当前未获得对该目录的写入权限:\n{folder}\n这可能导致客户端上传或修改文件失败。")
+
+            # M1/macOS 特权端口警告
+            if sys.platform == 'darwin' and port < 1024:
+                messagebox.showwarning("特权端口提示", f"在 macOS 上监听 1024 以下的端口 (当前: {port}) 通常需要 sudo 权限。\n如果下面启动失败，请尝试使用 2121 或更大端口。")
+
+            # 端口冲突预检
+            test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                test_sock.bind(('0.0.0.0', port))
+                test_sock.close()
+            except OSError:
+                messagebox.showerror("端口被占用", f"无法绑定端口 {port}。\n请检查是否有其他 FTP 软件正在运行，或者尝试更换端口。")
                 return
 
             # Re-apply firewall rules for the chosen port (Windows only)
@@ -392,54 +436,28 @@ class FTPApp:
             self.cb_auth.configure(state='normal')
 
     def configure_firewall(self):
-        """Execute netsh commands to allow port 21 and passive ports"""
+        """Execute netsh commands to allow customized port and passive ports"""
         if sys.platform != 'win32':
             return
         
         try:
-            # Check if rule exists (simplification: just add it, netsh handles duplicates usually or usage 'set' logic)
-            # Actually netsh add rule will duplicate if run multiple times with same name but different params.
-            # Best strictly to delete then add, or ignore.
-            
-            # This requires Admin privileges. 
-            # We assume the app is run as Admin (via UAC manifest in spec).
-            
-            rule_name = "SimpleFTPServer_Port21_Passive"
-            
-            # 0. Delete existing rules first (Clean slate)
-            subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}_Passive"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-
-            # 1. Allow Port Custom (Control)
-            # Note: If user changes port constantly, we might leave old rules if we only delete by name.
-            # But we delete by name "SimpleFTPServer_Port21_Passive" (maybe rename rule to match generic or current?)
-            # For simplicity, we stick to fixed rule name but update the port
-            # Logic: Delete rule 'SimpleFTPServer_Control' -> Add new rule with current port
-            
-            rule_name = "SimpleFTPServer_Control"
-
-            # 0. Delete existing rules first
-            subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}_Passive"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            
-            # Get current port
             try:
                 current_port = int(self.port_var.get())
             except ValueError:
                 current_port = 21
 
+            rule_name = f"SimpleFTPServer_Port{current_port}"
+            
+            # 0. Delete existing rules for this port first
+            subprocess.run(
+                f'netsh advfirewall firewall delete rule name="{rule_name}"',
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            subprocess.run(
+                f'netsh advfirewall firewall delete rule name="{rule_name}_Passive"',
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            
             # 1. Allow Control Port
             subprocess.run(
                 f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=TCP localport={current_port}',
@@ -450,9 +468,9 @@ class FTPApp:
                 f'netsh advfirewall firewall add rule name="{rule_name}_Passive" dir=in action=allow protocol=TCP localport=60000-60100',
                 shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            self.log_message("Windows 防火墙规则配置完成 (已清理旧规则)")
+            self.log_message(f"Windows 防火墙规则更新完成 (已放行 TCP {current_port} 及被动端口)")
         except Exception as e:
-            self.log_message(f"防火墙配置失败 (即非管理员运行?): {e}")
+            self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
     def check_startup_registry(self):
         if sys.platform != 'win32': return
@@ -503,10 +521,12 @@ class FTPApp:
     def hide_window(self):
         self.root.withdraw()
         if not self.tray_icon:
-            # Create a simple icon (e.g., a blue square) if no external ico file exists
-            image = Image.new('RGB', (64, 64), color=(0, 122, 204))
+            # 支持深色模式透明化的图标
+            image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(image)
-            draw.text((10, 20), "FTP", fill=(255, 255, 255))
+            # 画一个带圆角的深蓝色实心圆作为底
+            draw.ellipse((4, 4, 60, 60), fill=(0, 122, 204, 255))
+            draw.text((18, 24), "FTP", fill=(255, 255, 255, 255))
             
             menu = pystray.Menu(
                 pystray.MenuItem('显示窗口', self.show_window, default=True),

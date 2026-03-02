@@ -60,7 +60,18 @@ pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Serv
 pyinstaller --noconfirm --onefile --windowed --name "FTP_Simple_Server" --hidden-import=zeroconf main.py
 ```
 
-注意：macOS 上直接运行生成的 Unix 可执行文件或 `.app` 包。若遇到权限问题（绑定 21 端口），可能需要 `sudo` 运行或调整端口。
+> [!WARNING] macOS M 系列芯片 (Apple Silicon) 打包陷阱
+>
+> 如果你使用的是最新的 macOS 并在打包或运行后遇到诸如 `macOS 26 (2603) or later required, abort trap: 6` 的严重崩溃报错，这大概率是 macOS **系统自带**的 Python 在调用图形库 Tkinter 时发生的兼容性灾难。
+> 
+> **Apple Silicon (M1/M2) 正确的打包和运行姿势：**
+> 1. 不要使用系统自带的 python3，请通过 Homebrew 全局安装原生的 Python 3：
+>    `brew install python-tk@3.10` （或者你的具体 python 版本）
+> 2. 使用该 Homebrew 版本的 python 创建纯净的原生虚拟环境：
+>    `/opt/homebrew/bin/python3 -m venv venv2`
+> 3. `source venv2/bin/activate` 激活后，再重新执行 `pip install` 和 `pyinstaller` 的打包命令。
+>
+> 注意：macOS 上直接运行生成的 Unix 可执行文件或 `.app` 包。由于系统级权限限制，在 macOS 若试图绑定 `21` 等 1024 以下的特权端口，必须在终端用 `sudo` 运行，否则会遭遇 Permission Denied。建议 macOS 非特权测试时将端口改为 `2121`。
 
 ## 常见问题
 

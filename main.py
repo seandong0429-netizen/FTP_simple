@@ -8,6 +8,17 @@ import base64
 import io
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
+import psutil
+
+try:
+    import win32serviceutil
+    import win32service
+    import win32event
+    import servicemanager
+    import win32api
+    import winerror
+except ImportError:
+    win32serviceutil = None
 
 # --- 托盘图标相关 ---
 import pystray
@@ -26,12 +37,16 @@ if sys.platform == 'win32':
 class SimpleFTPServer:
     """FTP 服务核心层，负责服务的启动、停止和网络发现"""
 
-    def __init__(self, logger_func):
-        self.logger_func = logger_func
+    def __init__(self, logger_func=None): # Modified to accept optional logger_func
+        self.logger_func = logger_func if logger_func else self._default_logger
         self.server_v4 = None
         self.server_v6 = None
         self.zeroconf = None
         self.server_thread = None
+
+    def _default_logger(self, message):
+        """默认日志函数，用于服务模式下没有 GUI 的情况"""
+        print(message) # In service mode, this would typically go to event log or a file
 
     def log(self, message):
         self.logger_func(message)
@@ -225,14 +240,22 @@ class FTPApp:
 
     def __init__(self, root):
         self.root = root
-        self.ftp_server = SimpleFTPServer(self.log_message)
+        self.ftp_server = SimpleFTPServer() # Modified: Removed self.log_message from constructor
+        self.server_thread = None # Added: Initialize server_thread
         self.is_running = False
         self.tray_icon = None
         self._ui_ready = False  # UI 初始化完成标志，防止 trace 回调在组件未就绪时触发保存
-        self._pending_logs = []  # 暂存 UI 初始化前的日志消息
 
-        # 配置文件路径
-        self.config_file = os.path.join(os.path.expanduser("~"), ".ftp_simple_config.json")
+        # 配置文件路径修改为全体用户共享目录（兼容系统服务读取）
+        if sys.platform == 'win32':
+            app_data_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
+        else:
+            app_data_dir = os.path.expanduser('~/.ftp_simple_config')
+            
+        os.makedirs(app_data_dir, exist_ok=True)
+        self.config_file = os.path.join(app_data_dir, 'config.json')
+
+        self._pending_logs = []  # 暂存 UI 初始化前的日志消息
         self.config = self.load_config()
 
         # 日志性能缓冲队列
@@ -311,10 +334,10 @@ class FTPApp:
                                     validate='key', validatecommand=vcmd)
         self.entry_port.pack(side=tk.LEFT, padx=5)
 
-        # 开机自启复选框（仅 Windows）
+        # 开机自启复选框（原先的桌面快捷方式自启，跟底层系统服务二选一，保留做轻量选项）
         self.startup_var = tk.BooleanVar()
         if sys.platform == 'win32':
-            cb_startup = ttk.Checkbutton(opts_frame, text="开机自启", variable=self.startup_var, command=self.toggle_startup)
+            cb_startup = ttk.Checkbutton(opts_frame, text="开机自启 (GUI启动)", variable=self.startup_var, command=self.toggle_startup)
             cb_startup.pack(anchor=tk.W, pady=(5, 0))
         else:
             ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5, 0))
@@ -323,6 +346,16 @@ class FTPApp:
         self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start_service", False))
         cb_auto_start = ttk.Checkbutton(opts_frame, text="软件运行时自动开启服务", variable=self.auto_start_var)
         cb_auto_start.pack(anchor=tk.W, pady=(2, 0))
+
+        # 系统后台服务管理 (Windows 专属)
+        if sys.platform == 'win32' and win32serviceutil:
+            svc_frame = ttk.Frame(opts_frame)
+            svc_frame.pack(anchor=tk.W, fill=tk.X, pady=(10, 5))
+            ttk.Label(svc_frame, text="后台系统服务:").pack(side=tk.LEFT)
+            self.btn_install_svc = ttk.Button(svc_frame, text="安装服务", command=lambda: self.manage_system_service("install"))
+            self.btn_install_svc.pack(side=tk.LEFT, padx=5)
+            self.btn_remove_svc = ttk.Button(svc_frame, text="卸载服务", command=lambda: self.manage_system_service("remove"))
+            self.btn_remove_svc.pack(side=tk.LEFT)
 
         # 密码验证配置
         self.use_auth_var = tk.BooleanVar(value=self.config.get("use_auth", False))
@@ -600,7 +633,28 @@ class FTPApp:
         except Exception as e:
             self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
-    # --- 开机自启（仅 Windows） ---
+    def manage_system_service(self, action):
+        """以管理员身份安装或卸载 Windows 背景服务"""
+        import ctypes
+        
+        # 必须先保存当前配置，因为服务启动时只读磁盘配置
+        self.save_config()
+        
+        exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
+        args = f'"{exe_path}" {action}' if not getattr(sys, 'frozen', False) else action
+
+        # 提权调用自身
+        try:
+            # ShellExecuteW: hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, args, None, 1)
+            if ret > 32:
+                self.log_message(f"系统后台服务 [{action}] 命令已下发执行。提示: 请确保在服务管理组件(services.msc)中检查 [云铠办公扫描服务] 状态。")
+            else:
+                self.log_message(f"服务提权操作失败，返回码: {ret}")
+        except Exception as e:
+            self.log_message(f"执行服务命令失败: {e}")
+
+    # --- 开机自启 (轻量 GUI 模式) ---
 
     def check_startup_registry(self):
         if sys.platform != 'win32':
@@ -741,7 +795,90 @@ class FTPApp:
         self.root.after(0, _shutdown)
 
 
+# 动态基类，如果没有装 win32，则继承 object （避免 macOS 环境下编译报错）
+BaseService = win32serviceutil.ServiceFramework if win32serviceutil else object
+
+class FTPSysService(BaseService):
+    _svc_name_ = "FTPSimpleService"
+    _svc_display_name_ = "云铠办公扫描服务"
+    _svc_description_ = "轻量级 FTP 后台服务，让复印机扫描文件直达电脑。"
+
+    def __init__(self, args):
+        if win32serviceutil:
+            win32serviceutil.ServiceFramework.__init__(self, args)
+            self.hWaitStop = win32event.CreateEvent(None, 0, 0, None)
+        self.server = SimpleFTPServer()
+        
+        # 加载配置
+        app_data_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
+        self.config_file = os.path.join(app_data_dir, 'config.json')
+        self.config = {}
+        if os.path.exists(self.config_file):
+            import json
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = json.load(f)
+            except Exception:
+                pass
+
+        self.server.log_callback = self._log_to_event
+        self.running = False
+
+    def _log_to_event(self, msg):
+        if win32serviceutil:
+            servicemanager.LogInfoMsg(str(msg))
+        else:
+            print(msg)
+
+    def SvcStop(self):
+        self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
+        self.running = False
+        self.server.stop_service()
+        win32event.SetEvent(self.hWaitStop)
+
+    def SvcDoRun(self):
+        self.running = True
+        import base64
+        port = int(self.config.get('port', 21))
+        folder = self.config.get('folder', 'C:\\')
+        encoding = self.config.get('encoding', 'utf-8')
+        use_auth = self.config.get('use_auth', False)
+        username = self.config.get('username', 'admin')
+        password = base64.b64decode(self.config.get('password', '')).decode('utf-8') if self.config.get('password') else '123456'
+
+        self._log_to_event(f"Starting FTP service on port {port}, folder {folder}")
+        
+        def run_server():
+            self.server.start_service(port, folder, encoding, use_auth, username, password)
+
+        t = threading.Thread(target=run_server, daemon=True)
+        t.start()
+        
+        # 阻塞等待停止信号
+        win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
+        self._log_to_event("FTP service stopped.")
+
+
 def main():
+    # 判断是否是通过系统服务管理器启动
+    if len(sys.argv) > 1 and win32serviceutil is not None:
+        try:
+            win32serviceutil.HandleCommandLine(FTPSysService)
+            return
+        except win32service.error as e:
+            if getattr(winerror, 'ERROR_FAILED_SVC_CONTROLLER_CONNECT', None) and e.winerror == winerror.ERROR_FAILED_SVC_CONTROLLER_CONNECT:
+                pass
+            else:
+                raise
+
+    # 如果在系统服务 session 0 中直接被启动（无参数情况）
+    if win32serviceutil and servicemanager.RunningAsService():
+        servicemanager.Initialize()
+        servicemanager.PrepareToHostSingle(FTPSysService)
+        servicemanager.StartServiceCtrlDispatcher()
+        return
+
+    # 以上都不是，正常启动 GUI
     root = tk.Tk()
 
     # 单实例运行锁（通过绑定本地端口实现，同一时刻只允许一个实例运行）

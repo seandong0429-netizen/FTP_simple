@@ -5,6 +5,7 @@ import threading
 import subprocess
 import json
 import base64
+import io
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
 
@@ -650,16 +651,13 @@ class FTPApp:
         help_win.resizable(False, False)
 
         ttk.Label(help_win, text="云铠办公扫描工具 v2.0", font=("Microsoft YaHei", 14, "bold")).pack(pady=(15, 5))
-        ttk.Label(help_win, text="轻量级 FTP 服务端，让复印机扫描文件直达电脑").pack(pady=(0, 10))
+        ttk.Label(help_win, text="轻量级 FTP 服务端，让复印机扫描文件直达电脑").pack(pady=(0, 15))
 
-        ttk.Separator(help_win, orient='horizontal').pack(fill=tk.X, padx=20)
-
-        ttk.Label(help_win, text="联系作者 (微信扫码)", font=("Microsoft YaHei", 10)).pack(pady=(10, 5))
-
-        # 加载微信二维码图片
+        # 加载微信二维码图片（从内嵌资源读取）
         try:
-            qr_path = os.path.join(self._get_resource_dir(), 'wechat_qr.png')
-            qr_img = Image.open(qr_path)
+            from assets import WECHAT_QR_B64
+            qr_data = base64.b64decode(WECHAT_QR_B64)
+            qr_img = Image.open(io.BytesIO(qr_data))
             qr_img = qr_img.resize((200, 200), Image.LANCZOS)
             self._help_qr_photo = ImageTk.PhotoImage(qr_img)
             ttk.Label(help_win, image=self._help_qr_photo).pack(pady=5)
@@ -684,10 +682,11 @@ class FTPApp:
         return os.path.dirname(os.path.abspath(__file__))
 
     def _load_app_icon(self):
-        """加载应用图标，用于窗口和托盘"""
+        """加载应用图标，用于窗口和托盘（从内嵌资源读取）"""
         try:
-            icon_path = os.path.join(self._get_resource_dir(), 'app_icon.png')
-            return Image.open(icon_path)
+            from assets import APP_ICON_B64
+            icon_data = base64.b64decode(APP_ICON_B64)
+            return Image.open(io.BytesIO(icon_data))
         except Exception:
             # 降级：程序化生成简单图标
             image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
@@ -755,8 +754,8 @@ def main():
 
     # 设置窗口图标
     try:
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(sys.executable), 'app_icon.png')
-        icon_img = tk.PhotoImage(file=icon_path)
+        from assets import APP_ICON_B64
+        icon_img = tk.PhotoImage(data=APP_ICON_B64)
         root.iconphoto(True, icon_img)
     except Exception:
         pass

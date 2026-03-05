@@ -10,7 +10,7 @@ from tkinter import filedialog, ttk, scrolledtext, messagebox
 
 # --- 托盘图标相关 ---
 import pystray
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
@@ -51,7 +51,7 @@ class SimpleFTPServer:
             self.log(f"已启用密码验证 (账号: {username})")
         else:
             authorizer.add_anonymous(folder, perm="elradfmw")
-            self.log("已启用匿名访问 (无需密码)")
+            self.log("已启用匿名访问 (账号: anonymous，密码留空)")
 
         # NOTE: 每次启动时动态创建 FTPHandler 的子类，避免类属性在多次启停间相互污染
         handler_class = type("SessionFTPHandler", (FTPHandler,), {})
@@ -357,10 +357,16 @@ class FTPApp:
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9), state='disabled')
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
-        # 4. 底部状态栏
+        # 4. 底部状态栏（左侧状态 + 右侧帮助按钮）
+        bottom_frame = ttk.Frame(self.root)
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
         self.status_var = tk.StringVar(value="就绪")
-        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        status_bar = ttk.Label(bottom_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
+        status_bar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        btn_help = ttk.Button(bottom_frame, text="帮助", command=self.show_help)
+        btn_help.pack(side=tk.RIGHT, padx=2)
 
         # 绑定所有变量的值变化监听以便实时保存配置
         self.path_var.trace_add("write", lambda *args: self.save_config())
@@ -637,20 +643,70 @@ class FTPApp:
 
     # --- 系统托盘 ---
 
-    def hide_window(self):
-        self.root.withdraw()
-        if not self.tray_icon:
-            # 创建托盘图标（带透明背景的蓝色圆形 + FTP 文字）
+    def show_help(self):
+        """弹出帮助窗口，展示软件信息和作者微信二维码"""
+        help_win = tk.Toplevel(self.root)
+        help_win.title("帮助 - 云铠办公扫描工具")
+        help_win.resizable(False, False)
+
+        ttk.Label(help_win, text="云铠办公扫描工具 v2.0", font=("Microsoft YaHei", 14, "bold")).pack(pady=(15, 5))
+        ttk.Label(help_win, text="轻量级 FTP 服务端，让复印机扫描文件直达电脑").pack(pady=(0, 10))
+
+        ttk.Separator(help_win, orient='horizontal').pack(fill=tk.X, padx=20)
+
+        ttk.Label(help_win, text="联系作者 (微信扫码)", font=("Microsoft YaHei", 10)).pack(pady=(10, 5))
+
+        # 加载微信二维码图片
+        try:
+            qr_path = os.path.join(self._get_resource_dir(), 'wechat_qr.png')
+            qr_img = Image.open(qr_path)
+            qr_img = qr_img.resize((200, 200), Image.LANCZOS)
+            self._help_qr_photo = ImageTk.PhotoImage(qr_img)
+            ttk.Label(help_win, image=self._help_qr_photo).pack(pady=5)
+        except Exception as e:
+            ttk.Label(help_win, text=f"(二维码加载失败: {e})").pack(pady=5)
+
+        ttk.Button(help_win, text="关闭", command=help_win.destroy).pack(pady=(5, 15))
+
+        # 居中显示
+        help_win.update_idletasks()
+        w = help_win.winfo_width()
+        h = help_win.winfo_height()
+        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        help_win.geometry(f'+{x}+{y}')
+
+    @staticmethod
+    def _get_resource_dir():
+        """获取资源文件目录（兼容 PyInstaller 打包后的路径）"""
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def _load_app_icon(self):
+        """加载应用图标，用于窗口和托盘"""
+        try:
+            icon_path = os.path.join(self._get_resource_dir(), 'app_icon.png')
+            return Image.open(icon_path)
+        except Exception:
+            # 降级：程序化生成简单图标
             image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(image)
             draw.ellipse((4, 4, 60, 60), fill=(0, 122, 204, 255))
-            draw.text((18, 24), "FTP", fill=(255, 255, 255, 255))
+            draw.text((14, 20), "SCAN", fill=(255, 255, 255, 255))
+            return image
+
+    def hide_window(self):
+        self.root.withdraw()
+        if not self.tray_icon:
+            # 使用 app_icon.png 作为托盘图标
+            tray_image = self._load_app_icon().resize((64, 64), Image.LANCZOS)
 
             menu = pystray.Menu(
                 pystray.MenuItem('显示窗口', self.show_window, default=True),
                 pystray.MenuItem('退出', self.quit_app)
             )
-            self.tray_icon = pystray.Icon("FTP_Server", image, "云铠文件共享服务", menu)
+            self.tray_icon = pystray.Icon("FTP_Server", tray_image, "云铠办公扫描工具", menu)
 
             # 在独立线程中运行托盘图标，避免阻塞 tkinter mainloop
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
@@ -690,12 +746,20 @@ def main():
         root.lock_socket.bind(('127.0.0.1', 58732))
         root.lock_socket.listen(1)
     except OSError:
-        messagebox.showwarning("提示", "云铠文件共享服务已经在运行中！\n请检查右下角系统托盘。")
+        messagebox.showwarning("提示", "云铠办公扫描工具已经在运行中！\n请检查右下角系统托盘。")
         root.destroy()
         sys.exit(0)
 
-    root.title("云铠文件共享服务 v2.0")
+    root.title("云铠办公扫描工具 v2.0")
     root.geometry("600x540")
+
+    # 设置窗口图标
+    try:
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)) if not getattr(sys, 'frozen', False) else os.path.dirname(sys.executable), 'app_icon.png')
+        icon_img = tk.PhotoImage(file=icon_path)
+        root.iconphoto(True, icon_img)
+    except Exception:
+        pass
 
     app = FTPApp(root)
     root.mainloop()

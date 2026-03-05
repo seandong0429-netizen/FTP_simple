@@ -32,12 +32,16 @@ jobs:
     - name: Build with PyInstaller (Windows)
       if: runner.os == 'Windows'
       run: |
-        pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Server_Win" --hidden-import=zeroconf main.py
+        pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Server_Win" --hidden-import=zeroconf --add-data "app_icon.png;." --add-data "wechat_qr.png;." --icon=app_icon.png main.py
+        copy app_icon.png dist\
+        copy wechat_qr.png dist\
 
     - name: Build with PyInstaller (macOS)
       if: runner.os == 'macOS'
       run: |
-        pyinstaller --noconfirm --onefile --windowed --name "FTP_Simple_Server_Mac" --hidden-import=zeroconf main.py
+        pyinstaller --noconfirm --onefile --windowed --name "FTP_Simple_Server_Mac" --hidden-import=zeroconf --add-data "app_icon.png:." --add-data "wechat_qr.png:." --icon=app_icon.png main.py
+        cp app_icon.png dist/
+        cp wechat_qr.png dist/
 
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4

@@ -248,9 +248,15 @@ class FTPApp:
         if sys.platform == 'win32':
             self.check_startup_registry()
 
-        # 软件启动后，是否自动开启服务
+        # 软件启动后，是否自动开启服务；若自动启动则同时最小化到托盘，避免窗口弹出打扰用户
         if self.auto_start_var.get():
-            self.root.after(500, self.toggle_service)
+            self.root.after(500, self._auto_start_and_minimize)
+
+    def _auto_start_and_minimize(self):
+        """自动启动服务并最小化到系统托盘"""
+        self.toggle_service()
+        if self.is_running:
+            self.hide_window()
 
     def setup_ui(self):
         # 样式

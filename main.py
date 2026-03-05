@@ -182,7 +182,9 @@ class SimpleFTPServer:
                 family, _, _, _, sockaddr = info
                 ip = sockaddr[0]
                 if family == socket.AF_INET and not ip.startswith("127."):
-                    v4_ips.add(ip)
+                    # 对于 IPv4，剔除 Windows 常见的 169.254.x.x 自动专有 IP，并去重
+                    if not ip.startswith("169.254."):
+                        v4_ips.add(ip)
                 elif family == socket.AF_INET6 and not ip.startswith("::1"):
                     # 如果 IPv6 包含作用域 (即 %xxx)，我们可以选择展示它或者截断
                     v6_ips.add(ip)
@@ -351,12 +353,18 @@ class FTPApp:
         self.btn_start = ttk.Button(ctrl_frame, text="启动服务", style="Big.TButton", command=self.toggle_service)
         self.btn_start.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0), ipadx=20)
 
-        # 3. 日志窗口（默认禁用输入，写入时临时恢复）
+        # 3. 日志窗口
         log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9), state='disabled')
+        # 绑定特定事件，实现只读但允许复制的效果
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
+        # 禁止键盘按键输入，但保留 Ctrl+C (Command+C) 复制快捷键
+        self.log_text.bind("<Key>", lambda e: "break" if e.state & 0x4 == 0 and e.keysym not in ("c", "C") else None)
+        # 防止退格键或回车等其他输入
+        self.log_text.bind("<BackSpace>", lambda e: "break")
+        self.log_text.bind("<Return>", lambda e: "break")
 
         # 4. 底部状态栏（左侧状态 + 右侧帮助按钮）
         bottom_frame = ttk.Frame(self.root)
@@ -461,8 +469,6 @@ class FTPApp:
         self.log_buffer.clear()
         self.log_flush_scheduled = False
 
-        # 临时恢复为可编辑状态以写入日志，写入后立即禁用
-        self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, texts)
 
         # 防止长时间运行导致日志无限增长、内存溢出：超过上限时删除最早的行
@@ -471,7 +477,6 @@ class FTPApp:
             self.log_text.delete('1.0', f'{current_lines - self.MAX_LOG_LINES}.0')
 
         self.log_text.see(tk.END)
-        self.log_text.configure(state='disabled')
 
     # --- 服务启停控制 ---
 

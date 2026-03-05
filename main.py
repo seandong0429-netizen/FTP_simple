@@ -116,11 +116,11 @@ class SimpleFTPServer:
                     literal = ip.replace(':', '-').replace('%', 's') + '.ipv6-literal.net'
                     if ip.lower().startswith("fe80"):
                         # NOTE: fe80 链路本地地址不会随网络环境变化，更适合复印机等固定设备
-                        self.log(f"IPv6 本地链接 : {ip} (推荐复印机使用)")
+                        self.log(f"IPv6 本地链接 : ftp://[{ip}]:{port}/ (推荐复印机使用)")
                         self.log(f"  👉 Windows 访问: ftp://{literal}:{port}/")
                         self.log(f"  👉 (重要提示: 若复印机不支持 '%' 符号，请尝试去掉 '%' 及后面的数字)")
                     else:
-                        self.log(f"IPv6 局域网络 : {ip}")
+                        self.log(f"IPv6 局域网络 : ftp://[{ip}]:{port}/")
                         self.log(f"  👉 Windows 访问: ftp://{literal}:{port}/")
             else:
                 self.log(f"IPv6 访问 : 服务已开启，但未能自动获取到网卡 IPv6 地址，请查看系统网络信息。")

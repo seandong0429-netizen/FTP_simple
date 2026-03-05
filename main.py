@@ -17,6 +17,7 @@ try:
     import servicemanager
     import win32api
     import winerror
+    import win32timezone
 except ImportError:
     win32serviceutil = None
 

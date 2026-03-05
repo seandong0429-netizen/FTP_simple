@@ -32,7 +32,7 @@ jobs:
     - name: Build with PyInstaller (Windows)
       if: runner.os == 'Windows'
       run: |
-        pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Server_Win" --hidden-import=zeroconf --icon=app_icon.png main.py
+        pyinstaller --noconfirm --onefile --windowed --uac-admin --name "FTP_Simple_Server_Win" --hidden-import=zeroconf --hidden-import=win32timezone --icon=app_icon.png main.py
 
     - name: Build with PyInstaller (macOS)
       if: runner.os == 'macOS'

@@ -2,47 +2,29 @@ import os
 import sys
 import socket
 import threading
-import logging
-import platform
 import subprocess
 import json
+import base64
 import tkinter as tk
 from tkinter import filedialog, ttk, scrolledtext, messagebox
 
-# --- Tray imports ---
+# --- 托盘图标相关 ---
 import pystray
 from PIL import Image, ImageDraw
-import threading
 
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 from zeroconf import Zeroconf, ServiceInfo
 
-# Windows specific imports
+# Windows 注册表模块（仅 Windows 平台加载）
 if sys.platform == 'win32':
     import winreg
 
-# Configure logging to write to a string buffer or custom handler later
-# For now, we will use a custom logger class to redirect to GUI
-
-class TextHandler(logging.Handler):
-    """This class allows logging to a Tkinter Text or ScrolledText widget"""
-    def __init__(self, text_widget):
-        super().__init__()
-        self.text_widget = text_widget
-
-    def emit(self, record):
-        msg = self.format(record)
-        def append():
-            self.text_widget.configure(state='normal')
-            self.text_widget.insert(tk.END, msg + '\n')
-            self.text_widget.see(tk.END)
-            self.text_widget.configure(state='disabled')
-        # Schedule the append in the main thread
-        self.text_widget.after(0, append)
 
 class SimpleFTPServer:
+    """FTP 服务核心层，负责服务的启动、停止和网络发现"""
+
     def __init__(self, logger_func):
         self.logger_func = logger_func
         self.server_v4 = None
@@ -58,9 +40,9 @@ class SimpleFTPServer:
             self.log(f"错误: 路径不存在 -> {folder}")
             return False
 
-        # 1. FTP Core Configuration
+        # 1. FTP 核心配置
         authorizer = DummyAuthorizer()
-        # perm="elradfmw": e-change directory, l-list, r-retrieve, a-append, d-delete, f-rename, m-make dir, w-store
+        # perm="elradfmw": e-切换目录, l-列表, r-下载, a-追加, d-删除, f-重命名, m-创建目录, w-上传
         if use_auth:
             if not username or not password:
                 self.log("错误: 启用密码验证时，账号和密码不能为空")
@@ -70,20 +52,22 @@ class SimpleFTPServer:
         else:
             authorizer.add_anonymous(folder, perm="elradfmw")
             self.log("已启用匿名访问 (无需密码)")
-        
-        handler = FTPHandler
-        handler.authorizer = authorizer
-        handler.encoding = encoding
-        # Passive ports range for firewall configuration consistency
-        handler.passive_ports = range(60000, 60100)
-        
+
+        # NOTE: 每次启动时动态创建 FTPHandler 的子类，避免类属性在多次启停间相互污染
+        handler_class = type("SessionFTPHandler", (FTPHandler,), {})
+        handler_class.authorizer = authorizer
+        handler_class.encoding = encoding
+        # 被动模式端口范围（便于防火墙统一放行）
+        handler_class.passive_ports = range(60000, 60100)
+
         # 2. 启动服务监听 (IPv4 + IPv6 双栈)
         try:
-            self.server_v4 = FTPServer(('0.0.0.0', port), handler)
+            self.server_v4 = FTPServer(('0.0.0.0', port), handler_class)
         except Exception as e:
             self.log(f"启动 IPv4 服务失败 (端口被占用或无权限): {e}")
             return False
 
+        sock_v6 = None
         try:
             # 手动创建 IPv6 Socket 并开启 IPV6_V6ONLY = 1，避免与 0.0.0.0 冲突
             sock_v6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
@@ -94,31 +78,37 @@ class SimpleFTPServer:
             sock_v6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock_v6.bind(('::', port))
             sock_v6.listen(5)
-            self.server_v6 = FTPServer(sock_v6, handler)
+            self.server_v6 = FTPServer(sock_v6, handler_class)
         except Exception as e:
             self.log(f"提示: 本机 IPv6 监听未开启或不支持 ({e})，仅使用 IPv4。")
+            # NOTE: 绑定失败时必须关闭 Socket，否则会造成资源泄漏
+            if sock_v6 is not None:
+                try:
+                    sock_v6.close()
+                except Exception:
+                    pass
             self.server_v6 = None
 
         # 因为 pyftpdlib 默认共用 IOLoop，只要调用其中一个 serve_forever，
         # 就会同时处理 server_v4 和 server_v6 的请求。
         self.server_thread = threading.Thread(target=self.server_v4.serve_forever, daemon=True)
         self.server_thread.start()
-        
+
         hostname = socket.gethostname()
         self.log(f"FTP 服务已启动 (支持局域网 IPv4 与 IPv6 连接)")
         self.log(f"本地路径: {folder}")
         self.log(f"编码: {encoding}")
         self.log(f"主机名访问: ftp://{hostname}.local:{port}/ (推荐)")
-        
+
         # 获取真实 IP 列表展示给用户
         v4_list, v6_list = self.get_all_ips()
-        
+
         if not v4_list:
             v4_list = [self.get_local_ip()]
-            
+
         for ip in v4_list:
             self.log(f"IPv4 可用 : ftp://{ip}:{port}/")
-            
+
         if self.server_v6:
             if v6_list:
                 for ip in v6_list:
@@ -130,21 +120,21 @@ class SimpleFTPServer:
                         self.log(f"IPv6 局域网络 : {ip} (推荐复印机使用)")
             else:
                 self.log(f"IPv6 访问 : 服务已开启，但未能自动获取到网卡 IPv6 地址，请查看系统网络信息。")
-        
-        # 3. mDNS (.local) Broadcast
+
+        # 3. mDNS (.local) 广播
         self.start_mdns(port)
-        
+
         return True
 
     def start_mdns(self, port):
         try:
             self.zeroconf = Zeroconf()
             hostname = socket.gethostname()
-            # Try to find the real LAN IP
+            # 获取真实局域网 IP
             v4_ips, v6_ips = self.get_all_ips()
             local_ip = self.get_local_ip()
-            
-            # Remove scope IDs from IPv6 for Zeroconf parsed_addresses compatibility
+
+            # 移除 IPv6 中的作用域 ID（如 %en0），以兼容 Zeroconf parsed_addresses
             clean_v6_ips = [ip.split('%')[0] for ip in v6_ips]
             all_ips_str = v4_ips + clean_v6_ips
             if not all_ips_str:
@@ -167,15 +157,12 @@ class SimpleFTPServer:
 
     def get_local_ip(self):
         try:
-            # Trick to find the WAN facing IP without connecting
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # 8.8.8.8 is a Google DNS, doesn't need to be reachable, just helps socket find route
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
+            # 通过连接外网 DNS 来让系统自动选出最优的本机局域网 IP（无需真正建立连接）
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
         except Exception:
-            # Fallback for offline/pure LAN
+            # 离线环境降级方案
             try:
                 return socket.gethostbyname(socket.gethostname())
             except Exception:
@@ -197,7 +184,7 @@ class SimpleFTPServer:
                     v6_ips.add(ip)
         except Exception as e:
             self.log(f"获取网卡 IP 失败: {e}")
-        
+
         return list(v4_ips), list(v6_ips)
 
     def stop_service(self):
@@ -215,132 +202,153 @@ class SimpleFTPServer:
                 except Exception:
                     pass
                 self.server_v6 = None
-        
+
         if self.zeroconf:
             self.log("正在停止 mDNS 广播...")
             self.zeroconf.close()
             self.zeroconf = None
-            
+
         self.log("服务已停止")
 
+
 class FTPApp:
+    """FTP 服务 GUI 界面层"""
+
+    # 日志文本框最大保留行数，超出时自动清除最早的日志
+    MAX_LOG_LINES = 1000
+
     def __init__(self, root):
         self.root = root
         self.ftp_server = SimpleFTPServer(self.log_message)
         self.is_running = False
         self.tray_icon = None
-        
+        self._ui_ready = False  # UI 初始化完成标志，防止 trace 回调在组件未就绪时触发保存
+        self._pending_logs = []  # 暂存 UI 初始化前的日志消息
+
         # 配置文件路径
         self.config_file = os.path.join(os.path.expanduser("~"), ".ftp_simple_config.json")
         self.config = self.load_config()
-        
+
         # 日志性能缓冲队列
         self.log_buffer = []
         self.log_flush_scheduled = False
-        
+
         self.setup_ui()
-        
+        self._ui_ready = True
+
+        # 将 UI 初始化前暂存的日志输出到日志窗口
+        for msg in self._pending_logs:
+            self.log_message(msg)
+        self._pending_logs.clear()
+
         # 拦截点击右上角 X 关闭窗口的事件，改为最小化到托盘
         self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
-        
-        # Auto-configure firewall on Windows startup
-        if sys.platform == 'win32':
-             self.configure_firewall()
-        
-        # Check registry for startup state
+
+        # 从注册表同步"开机自启"勾选框状态
         if sys.platform == 'win32':
             self.check_startup_registry()
 
+        # 软件启动后，是否自动开启服务
+        if self.auto_start_var.get():
+            self.root.after(500, self.toggle_service)
+
     def setup_ui(self):
-        # Styles
+        # 样式
         style = ttk.Style()
         style.configure("Big.TButton", font=("Microsoft YaHei", 12, "bold"))
-        
-        # 1. Path Selection
+
+        # 1. 共享目录选择
         path_frame = ttk.LabelFrame(self.root, text="共享目录", padding=10)
         path_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
         self.path_var = tk.StringVar()
         default_path = self.config.get("folder", "")
         if not default_path or not os.path.exists(default_path):
             default_path = os.path.join(os.path.expanduser("~"), "Desktop")
             if not os.path.exists(default_path):
-                 default_path = os.path.expanduser("~")
+                default_path = os.path.expanduser("~")
         self.path_var.set(default_path)
-        
+
         entry = ttk.Entry(path_frame, textvariable=self.path_var)
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-        
+
         btn_browse = ttk.Button(path_frame, text="浏览...", command=self.browse_folder)
         btn_browse.pack(side=tk.RIGHT)
 
-        # 2. Control Layout (Buttons + Options)
+        # 2. 控制布局（选项 + 按钮）
         ctrl_frame = ttk.Frame(self.root, padding=10)
         ctrl_frame.pack(fill=tk.X, padx=10)
 
-        # Left side: Options
+        # 左侧：选项区
         opts_frame = ttk.Labelframe(ctrl_frame, text="设置", padding=5)
         opts_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
-        
-        # Encoding Toggle
+
+        # 编码切换
         self.encoding_var = tk.StringVar(value=self.config.get("encoding", "utf-8"))
         ttk.Radiobutton(opts_frame, text="通用模式 (UTF-8)", variable=self.encoding_var, value="utf-8").pack(anchor=tk.W)
         ttk.Radiobutton(opts_frame, text="兼容模式 (GBK)", variable=self.encoding_var, value="gbk").pack(anchor=tk.W)
 
-        # Port Configuration
+        # 端口配置
         port_frame = ttk.Frame(opts_frame)
-        port_frame.pack(anchor=tk.W, pady=(5,0))
+        port_frame.pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(port_frame, text="端口:").pack(side=tk.LEFT)
         self.port_var = tk.StringVar(value=str(self.config.get("port", "21")))
-        self.entry_port = ttk.Entry(port_frame, textvariable=self.port_var, width=6)
+        # 校验函数：只允许输入纯数字或空字符串（删除时），防止非法端口值
+        vcmd = (self.root.register(lambda s: s == "" or s.isdigit()), '%P')
+        self.entry_port = ttk.Entry(port_frame, textvariable=self.port_var, width=6,
+                                    validate='key', validatecommand=vcmd)
         self.entry_port.pack(side=tk.LEFT, padx=5)
-        
-        # Startup Checkbox (Windows Only)
+
+        # 开机自启复选框（仅 Windows）
         self.startup_var = tk.BooleanVar()
         if sys.platform == 'win32':
             cb_startup = ttk.Checkbutton(opts_frame, text="开机自启", variable=self.startup_var, command=self.toggle_startup)
-            cb_startup.pack(anchor=tk.W, pady=(5,0))
+            cb_startup.pack(anchor=tk.W, pady=(5, 0))
         else:
-            ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5,0))
+            ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5, 0))
 
-        # Auth Configuration
+        # 运行后自动开启服务
+        self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start_service", False))
+        cb_auto_start = ttk.Checkbutton(opts_frame, text="软件运行时自动开启服务", variable=self.auto_start_var)
+        cb_auto_start.pack(anchor=tk.W, pady=(2, 0))
+
+        # 密码验证配置
         self.use_auth_var = tk.BooleanVar(value=self.config.get("use_auth", False))
         self.username_var = tk.StringVar(value=self.config.get("username", "admin"))
-        self.password_var = tk.StringVar(value=self.config.get("password", "123456"))
-        
+        # 密码从 base64 解码还原
+        self.password_var = tk.StringVar(value=self._decode_password(self.config.get("password", "")))
+
         auth_frame = ttk.Frame(opts_frame)
-        auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5,0))
-        
+        auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5, 0))
+
         self.cb_auth = ttk.Checkbutton(auth_frame, text="启用访问密码", variable=self.use_auth_var, command=self.toggle_auth_ui)
         self.cb_auth.pack(anchor=tk.W)
-        
+
         self.auth_input_frame = ttk.Frame(auth_frame)
-        
+
         ttk.Label(self.auth_input_frame, text="账号:").pack(side=tk.LEFT)
         self.entry_user = ttk.Entry(self.auth_input_frame, textvariable=self.username_var, width=10)
-        self.entry_user.pack(side=tk.LEFT, padx=(0,5))
-        
+        self.entry_user.pack(side=tk.LEFT, padx=(0, 5))
+
         ttk.Label(self.auth_input_frame, text="密码:").pack(side=tk.LEFT)
         self.entry_pass = ttk.Entry(self.auth_input_frame, textvariable=self.password_var, width=10)
         self.entry_pass.pack(side=tk.LEFT)
-        
-        # Initialize hidden
+
+        # 初始化时根据勾选状态显示或隐藏密码输入框
         self.toggle_auth_ui()
 
-        # Right side: Big Start Button
+        # 右侧：启动按钮
         self.btn_start = ttk.Button(ctrl_frame, text="启动服务", style="Big.TButton", command=self.toggle_service)
         self.btn_start.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0), ipadx=20)
 
-        # 3. Log Window
+        # 3. 日志窗口（默认禁用输入，写入时临时恢复）
         log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9))
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        # 允许鼠标选择和复制，但禁止键盘输入输入内容
-        self.log_text.bind("<Key>", lambda e: "break" if e.state != 4 and e.state != 8 and e.keysym not in ("c", "C") else None)
 
-        # 4. Footer / Status
+        self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9), state='disabled')
+        self.log_text.pack(fill=tk.BOTH, expand=True)
+
+        # 4. 底部状态栏
         self.status_var = tk.StringVar(value="就绪")
         status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
@@ -352,12 +360,35 @@ class FTPApp:
         self.use_auth_var.trace_add("write", lambda *args: self.save_config())
         self.username_var.trace_add("write", lambda *args: self.save_config())
         self.password_var.trace_add("write", lambda *args: self.save_config())
-        
+        self.auto_start_var.trace_add("write", lambda *args: self.save_config())
+
     def toggle_auth_ui(self):
         if self.use_auth_var.get():
-            self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2,0))
+            self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
         else:
             self.auth_input_frame.pack_forget()
+
+    # --- 密码编解码（base64 视觉遮蔽，仅防止肉眼直读，并非安全加密） ---
+
+    @staticmethod
+    def _encode_password(plain: str) -> str:
+        """将明文密码编码为 base64 字符串"""
+        if not plain:
+            return ""
+        return base64.b64encode(plain.encode('utf-8')).decode('utf-8')
+
+    @staticmethod
+    def _decode_password(encoded: str) -> str:
+        """将 base64 密码解码为明文；兼容旧版明文密码"""
+        if not encoded:
+            return ""
+        try:
+            return base64.b64decode(encoded.encode('utf-8')).decode('utf-8')
+        except Exception:
+            # 兼容旧版本直接存储的明文密码
+            return encoded
+
+    # --- 配置文件读写 ---
 
     def load_config(self):
         try:
@@ -365,31 +396,36 @@ class FTPApp:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception as e:
-            self.log_message(f"加载配置文件失败: {e}")
+            # NOTE: 此时 UI 尚未初始化，将消息暂存到 _pending_logs，待 UI 就绪后统一输出
+            self._pending_logs.append(f"[警告] 加载配置文件失败: {e}")
         return {}
-        
+
     def save_config(self):
-        # 遇到正在初始化时由于变量未挂载可能报错，用 getattr 防御
-        if not hasattr(self, 'path_var'): return
-        
+        # 在 UI 组件全部初始化完成之前不执行保存，避免 trace 回调触发时变量未就绪
+        if not self._ui_ready:
+            return
+
         data = {
             "folder": self.path_var.get(),
             "encoding": self.encoding_var.get(),
             "port": self.port_var.get(),
             "use_auth": self.use_auth_var.get(),
             "username": self.username_var.get(),
-            "password": self.password_var.get()
+            "password": self._encode_password(self.password_var.get()),
+            "auto_start_service": self.auto_start_var.get()
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        except Exception as e:
+            self.log_message(f"[警告] 保存配置文件失败: {e}")
 
     def browse_folder(self):
         folder = filedialog.askdirectory(initialdir=self.path_var.get())
         if folder:
             self.path_var.set(folder)
+
+    # --- 日志系统（缓冲写入，减少 UI 刷新次数） ---
 
     def log_message(self, msg):
         self.root.after(0, lambda: self._append_log(msg))
@@ -404,117 +440,150 @@ class FTPApp:
         if not self.log_buffer:
             self.log_flush_scheduled = False
             return
-        
+
         texts = "".join(self.log_buffer)
         self.log_buffer.clear()
         self.log_flush_scheduled = False
-        
+
+        # 临时恢复为可编辑状态以写入日志，写入后立即禁用
+        self.log_text.configure(state='normal')
         self.log_text.insert(tk.END, texts)
+
+        # 防止长时间运行导致日志无限增长、内存溢出：超过上限时删除最早的行
+        current_lines = int(self.log_text.index('end-1c').split('.')[0])
+        if current_lines > self.MAX_LOG_LINES:
+            self.log_text.delete('1.0', f'{current_lines - self.MAX_LOG_LINES}.0')
+
         self.log_text.see(tk.END)
+        self.log_text.configure(state='disabled')
+
+    # --- 服务启停控制 ---
 
     def toggle_service(self):
         if not self.is_running:
-            # Start
+            # 启动服务
             folder = self.path_var.get()
             encoding = self.encoding_var.get()
             use_auth = self.use_auth_var.get()
             username = self.username_var.get()
             password = self.password_var.get()
-            
+
             try:
                 port = int(self.port_var.get())
             except ValueError:
                 self.log_message("错误: 端口必须是数字")
                 return
 
+            # 端口范围校验
+            if not (1 <= port <= 65535):
+                self.log_message(f"错误: 端口号必须在 1-65535 之间 (当前: {port})")
+                return
+
             # 写入权限校验
             if not os.access(folder, os.W_OK):
                 messagebox.showwarning("权限提示", f"程序当前未获得对该目录的写入权限:\n{folder}\n这可能导致客户端上传或修改文件失败。")
 
-            # M1/macOS 特权端口警告
+            # macOS 特权端口警告
             if sys.platform == 'darwin' and port < 1024:
                 messagebox.showwarning("特权端口提示", f"在 macOS 上监听 1024 以下的端口 (当前: {port}) 通常需要 sudo 权限。\n如果下面启动失败，请尝试使用 2121 或更大端口。")
 
-            # 端口冲突预检
+            # 端口冲突预检（使用 try/finally 确保 Socket 必定关闭）
             test_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             try:
                 test_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 test_sock.bind(('0.0.0.0', port))
-                test_sock.close()
             except OSError:
                 messagebox.showerror("端口被占用", f"无法绑定端口 {port}。\n请检查是否有其他 FTP 软件正在运行，或者尝试更换端口。")
                 return
+            finally:
+                test_sock.close()
 
-            # Re-apply firewall rules for the chosen port (Windows only)
+            # 异步配置防火墙规则（仅 Windows），避免阻塞主线程
             if sys.platform == 'win32':
-                self.configure_firewall()
+                threading.Thread(target=self.configure_firewall, args=(port,), daemon=True).start()
 
             auth_status = '启用' if use_auth else '关闭'
             self.log_message(f"--- 尝试启动 (端口: {port}, 编码: {encoding}, 密码验证: {auth_status}) ---")
             success = self.ftp_server.start_service(folder, port=port, encoding=encoding, use_auth=use_auth, username=username, password=password)
-            
+
             if success:
                 self.is_running = True
                 self.btn_start.configure(text="停止服务")
                 self.status_var.set("状态: 运行中")
-                self.entry_port.configure(state='disabled') # Lock port while running
+                self.entry_port.configure(state='disabled')
                 self.entry_user.configure(state='disabled')
                 self.entry_pass.configure(state='disabled')
                 self.cb_auth.configure(state='disabled')
-                # Disable options while running
-                # (Optional: disable encoding radio buttons)
             else:
                 self.status_var.set("状态: 启动失败")
         else:
-            # Stop
+            # 停止服务
             self.ftp_server.stop_service()
             self.is_running = False
             self.btn_start.configure(text="启动服务")
             self.status_var.set("状态: 已停止")
-            self.entry_port.configure(state='normal') # Unlock port
+            self.entry_port.configure(state='normal')
             self.entry_user.configure(state='normal')
             self.entry_pass.configure(state='normal')
             self.cb_auth.configure(state='normal')
 
-    def configure_firewall(self):
-        """Execute netsh commands to allow customized port and passive ports"""
+    # --- Windows 防火墙配置 ---
+
+    def configure_firewall(self, port=None):
+        """使用 netsh 命令放行 FTP 控制端口和被动模式端口"""
         if sys.platform != 'win32':
             return
-        
+
         try:
-            try:
-                current_port = int(self.port_var.get())
-            except ValueError:
-                current_port = 21
+            if port is None:
+                try:
+                    current_port = int(self.port_var.get())
+                except ValueError:
+                    current_port = 21
+            else:
+                current_port = port
 
             rule_name = f"SimpleFTPServer_Port{current_port}"
-            
-            # 0. Delete existing rules for this port first
+
+            # 使用列表参数 + shell=False，避免命令注入风险
+            # 0. 先删除同名旧规则
             subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule_name}'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
             subprocess.run(
-                f'netsh advfirewall firewall delete rule name="{rule_name}_Passive"',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                ['netsh', 'advfirewall', 'firewall', 'delete', 'rule', f'name={rule_name}_Passive'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-            
-            # 1. Allow Control Port
-            subprocess.run(
-                f'netsh advfirewall firewall add rule name="{rule_name}" dir=in action=allow protocol=TCP localport={current_port}',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+
+            # 1. 放行控制端口
+            r1 = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                 f'name={rule_name}', 'dir=in', 'action=allow', 'protocol=TCP',
+                 f'localport={current_port}'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
             )
-            # 2. Allow Passive Ports (60000-60100)
-            subprocess.run(
-                f'netsh advfirewall firewall add rule name="{rule_name}_Passive" dir=in action=allow protocol=TCP localport=60000-60100',
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            # 2. 放行被动模式端口 (60000-60100)
+            r2 = subprocess.run(
+                ['netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                 f'name={rule_name}_Passive', 'dir=in', 'action=allow', 'protocol=TCP',
+                 'localport=60000-60100'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
             )
-            self.log_message(f"Windows 防火墙规则更新完成 (已放行 TCP {current_port} 及被动端口)")
+
+            # 检查返回码，非零说明操作失败（通常是缺少管理员权限）
+            if r1.returncode != 0 or r2.returncode != 0:
+                self.log_message(f"防火墙规则添加失败 (需要以管理员身份运行程序)")
+            else:
+                self.log_message(f"Windows 防火墙规则更新完成 (已放行 TCP {current_port} 及被动端口)")
         except Exception as e:
             self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
+    # --- 开机自启（仅 Windows） ---
+
     def check_startup_registry(self):
-        if sys.platform != 'win32': return
+        if sys.platform != 'win32':
+            return
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_READ)
             try:
@@ -527,20 +596,19 @@ class FTPApp:
             self.log_message(f"读取自启注册表失败: {e}")
 
     def toggle_startup(self):
-        if sys.platform != 'win32': return
-        
+        if sys.platform != 'win32':
+            return
+
         app_path = sys.executable
-        # If running as script, use python exe + script path
+        # 区分脚本运行和打包 exe 运行
         if not getattr(sys, 'frozen', False):
-            # We are running as script
             app_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
         else:
-            # We are running as exe
             app_path = f'"{sys.executable}"'
 
         is_checked = self.startup_var.get()
         key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        
+
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
             if is_checked:
@@ -555,52 +623,74 @@ class FTPApp:
             winreg.CloseKey(key)
         except Exception as e:
             self.log_message(f"修改开机自启失败: {e}")
-            # Revert checkbox if failed
+            # 操作失败时回滚复选框状态
             self.startup_var.set(not is_checked)
 
-    # --- System Tray Functions ---
+    # --- 系统托盘 ---
+
     def hide_window(self):
         self.root.withdraw()
         if not self.tray_icon:
-            # 支持深色模式透明化的图标
+            # 创建托盘图标（带透明背景的蓝色圆形 + FTP 文字）
             image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
             draw = ImageDraw.Draw(image)
-            # 画一个带圆角的深蓝色实心圆作为底
             draw.ellipse((4, 4, 60, 60), fill=(0, 122, 204, 255))
             draw.text((18, 24), "FTP", fill=(255, 255, 255, 255))
-            
+
             menu = pystray.Menu(
                 pystray.MenuItem('显示窗口', self.show_window, default=True),
                 pystray.MenuItem('退出', self.quit_app)
             )
             self.tray_icon = pystray.Icon("FTP_Server", image, "云铠文件共享服务", menu)
-            
-            # Run tray icon in a separate thread so it doesn't block tkinter's mainloop
+
+            # 在独立线程中运行托盘图标，避免阻塞 tkinter mainloop
             threading.Thread(target=self.tray_icon.run, daemon=True).start()
 
     def show_window(self, icon=None, item=None):
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
-        self.root.deiconify()
+        """从托盘恢复窗口（注意：pystray 回调在非主线程，需通过 root.after 调度 tkinter 操作）"""
+        def _restore():
+            if self.tray_icon:
+                self.tray_icon.stop()
+                self.tray_icon = None
+            self.root.deiconify()
+            # 确保窗口恢复后置顶并获得焦点，避免被其他窗口遮挡
+            self.root.lift()
+            self.root.focus_force()
+        self.root.after(0, _restore)
 
     def quit_app(self, icon=None, item=None):
-        if self.tray_icon:
-            self.tray_icon.stop()
-        self.ftp_server.stop_service()
-        self.root.quit()
-        self.root.destroy()
-        sys.exit()
+        """完全退出程序"""
+        def _shutdown():
+            if self.tray_icon:
+                self.tray_icon.stop()
+            self.ftp_server.stop_service()
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+            sys.exit(0)
+        self.root.after(0, _shutdown)
+
 
 def main():
     root = tk.Tk()
+
+    # 单实例运行锁（通过绑定本地端口实现，同一时刻只允许一个实例运行）
+    try:
+        root.lock_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        root.lock_socket.bind(('127.0.0.1', 58732))
+        root.lock_socket.listen(1)
+    except OSError:
+        messagebox.showwarning("提示", "云铠文件共享服务已经在运行中！\n请检查右下角系统托盘。")
+        root.destroy()
+        sys.exit(0)
+
     root.title("云铠文件共享服务 v2.0")
-    root.geometry("600x500")
-    # Try to set icon if exists (optional)
-    # root.iconbitmap('icon.ico') 
-    
+    root.geometry("600x540")
+
     app = FTPApp(root)
     root.mainloop()
+
 
 if __name__ == "__main__":
     import multiprocessing

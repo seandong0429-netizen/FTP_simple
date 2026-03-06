@@ -792,9 +792,9 @@ class FTPApp:
         self.save_config()
 
         exe_path = sys.executable
-
-        # 使用 /k 保留命令行窗口便于排查错误（测试没问题后可改回 /c 让窗口自动关闭）
-        cmd_switch = "/k"
+        log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
+        os.makedirs(log_dir, exist_ok=True)
+        bat_path = os.path.join(log_dir, 'svc_action.bat')
 
         if action == "install":
             if self.is_running:
@@ -803,30 +803,55 @@ class FTPApp:
                 self.btn_start.configure(text="启动服务")
 
             if getattr(sys, 'frozen', False):
-                # 重点：命令最外层必须有一对双引号，防止 cmd /c 剥离引号导致空格路径截断
-                args = f'{cmd_switch} ""{exe_path}" install --startup auto && net start FTPSimpleService"'
+                install_cmd = f'"{exe_path}" install --startup auto'
             else:
-                args = f'{cmd_switch} ""{exe_path}" "{os.path.abspath(__file__)}" install --startup auto && net start FTPSimpleService"'
-            target = "cmd.exe"
+                install_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
+
+            bat_content = f'''@echo off
+echo [1/2] 正在安装服务...
+{install_cmd}
+echo.
+echo [2/2] 正在启动服务...
+net start FTPSimpleService
+echo.
+echo 操作完成，按任意键关闭此窗口。
+pause >nul
+'''
         elif action == "remove":
             if getattr(sys, 'frozen', False):
-                args = f'{cmd_switch} "net stop FTPSimpleService & "{exe_path}" remove"'
+                remove_cmd = f'"{exe_path}" remove'
             else:
-                args = f'{cmd_switch} "net stop FTPSimpleService & "{exe_path}" "{os.path.abspath(__file__)}" remove"'
-            target = "cmd.exe"
+                remove_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
+
+            bat_content = f'''@echo off
+echo [1/2] 正在停止服务...
+net stop FTPSimpleService
+echo.
+echo [2/2] 正在卸载服务...
+{remove_cmd}
+echo.
+echo 操作完成，按任意键关闭此窗口。
+pause >nul
+'''
         else:
-            target = exe_path
-            args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
+            return
 
         try:
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 1)
+            with open(bat_path, 'w', encoding='gbk') as f:
+                f.write(bat_content)
+        except Exception as e:
+            self.log_message(f"写入脚本文件失败: {e}")
+            return
+
+        try:
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat_path, None, None, 1)
             if ret > 32:
                 if action == "install":
-                    self.log_message("已申请管理员权限安装服务，请查看弹出的命令行窗口...")
+                    self.log_message("已申请管理员权限安装服务，请在弹出的窗口查看结果...")
                     self._register_gui_startup(True)
                 elif action == "remove":
                     self.log_message("已申请管理员权限卸载服务...")
-                self.root.after(6000, self._refresh_service_status)
+                self.root.after(8000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:

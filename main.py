@@ -282,61 +282,73 @@ class FTPApp:
     def __init__(self, root):
         self.root = root
         self.ftp_server = SimpleFTPServer()
-        self.ftp_server.logger_func = self.log_message  # BUG-1 FIX: 恢复日志回调，确保服务日志显示在 GUI
+        self.ftp_server.logger_func = self.log_message
         self.server_thread = None
         self.is_running = False
         self.tray_icon = None
-        self._ui_ready = False  # UI 初始化完成标志，防止 trace 回调在组件未就绪时触发保存
+        self._ui_ready = False
+        self._save_timer = None  # 防抖定时器 ID
 
-        # 配置文件路径修改为全体用户共享目录（兼容系统服务读取）
+        # 配置文件路径：全局共享目录（兼容系统服务读取）
         if sys.platform == 'win32':
             app_data_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
         else:
             app_data_dir = os.path.expanduser('~/.ftp_simple_config')
-            
         os.makedirs(app_data_dir, exist_ok=True)
         self.config_file = os.path.join(app_data_dir, 'config.json')
 
-        self._pending_logs = []  # 暂存 UI 初始化前的日志消息
+        self._pending_logs = []
         self.config = self.load_config()
 
-        # 日志性能缓冲队列
         self.log_buffer = []
         self.log_flush_scheduled = False
 
         self.setup_ui()
         self._ui_ready = True
 
-        # 将 UI 初始化前暂存的日志输出到日志窗口
         for msg in self._pending_logs:
             self.log_message(msg)
         self._pending_logs.clear()
 
-        # 拦截点击右上角 X 关闭窗口的事件，改为最小化到托盘
         self.root.protocol('WM_DELETE_WINDOW', self.hide_window)
 
-        # 从注册表同步"开机自启"勾选框状态
-        if sys.platform == 'win32':
-            self.check_startup_registry()
-
-        # 软件启动后，是否自动开启服务；若自动启动则同时最小化到托盘，避免窗口弹出打扰用户
-        if self.auto_start_var.get():
-            self.root.after(500, self._auto_start_and_minimize)
+        # 根据选择的模式执行不同的自启逻辑
+        self._apply_mode_ui()
+        if self.mode_var.get() == 'temp':
+            if self.auto_start_var.get():
+                self.root.after(500, self._auto_start_and_minimize)
+        else:
+            # 常驻模式：GUI 只用作管理面板，启动后最小化到托盘
+            self.root.after(500, self.hide_window)
 
     def _auto_start_and_minimize(self):
-        """自动启动服务并最小化到系统托盘"""
+        """临时模式：自动启动服务并最小化到系统托盘"""
         self.toggle_service()
         if self.is_running:
             self.hide_window()
 
     def setup_ui(self):
-        # 样式
         style = ttk.Style()
         style.configure("Big.TButton", font=("Microsoft YaHei", 12, "bold"))
+        style.configure("Mode.TRadiobutton", font=("Microsoft YaHei", 10))
 
-        # 1. 共享目录选择
-        path_frame = ttk.LabelFrame(self.root, text="共享目录", padding=10)
-        path_frame.pack(fill=tk.X, padx=10, pady=5)
+        # 0. 顶部模式选择器
+        mode_frame = ttk.LabelFrame(self.root, text="运行模式", padding=8)
+        mode_frame.pack(fill=tk.X, padx=10, pady=(5, 2))
+
+        self.mode_var = tk.StringVar(value=self.config.get("run_mode", "temp"))
+        ttk.Radiobutton(mode_frame, text="临时模式（关闭软件即停止）",
+                        variable=self.mode_var, value="temp",
+                        style="Mode.TRadiobutton",
+                        command=self._apply_mode_ui).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(mode_frame, text="常驻模式（开机自动运行，无需登录）",
+                        variable=self.mode_var, value="service",
+                        style="Mode.TRadiobutton",
+                        command=self._apply_mode_ui).pack(side=tk.LEFT)
+
+        # 1. 扫描目录选择
+        path_frame = ttk.LabelFrame(self.root, text="扫描目录（复印机扫描文件保存位置）", padding=10)
+        path_frame.pack(fill=tk.X, padx=10, pady=2)
 
         self.path_var = tk.StringVar()
         default_path = self.config.get("folder", "")
@@ -346,18 +358,14 @@ class FTPApp:
                 default_path = os.path.expanduser("~")
         self.path_var.set(default_path)
 
-        entry = ttk.Entry(path_frame, textvariable=self.path_var)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Entry(path_frame, textvariable=self.path_var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(path_frame, text="浏览...", command=self.browse_folder).pack(side=tk.RIGHT)
 
-        btn_browse = ttk.Button(path_frame, text="浏览...", command=self.browse_folder)
-        btn_browse.pack(side=tk.RIGHT)
-
-        # 2. 控制布局（选项 + 按钮）
+        # 2. 控制布局（选项 + 右侧按钮区）
         ctrl_frame = ttk.Frame(self.root, padding=10)
         ctrl_frame.pack(fill=tk.X, padx=10)
 
-        # 左侧：选项区
-        opts_frame = ttk.Labelframe(ctrl_frame, text="设置", padding=5)
+        opts_frame = ttk.LabelFrame(ctrl_frame, text="设置", padding=5)
         opts_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
 
         # 编码切换
@@ -370,67 +378,76 @@ class FTPApp:
         port_frame.pack(anchor=tk.W, pady=(5, 0))
         ttk.Label(port_frame, text="端口:").pack(side=tk.LEFT)
         self.port_var = tk.StringVar(value=str(self.config.get("port", "21")))
-        # 校验函数：只允许输入纯数字或空字符串（删除时），防止非法端口值
         vcmd = (self.root.register(lambda s: s == "" or s.isdigit()), '%P')
         self.entry_port = ttk.Entry(port_frame, textvariable=self.port_var, width=6,
                                     validate='key', validatecommand=vcmd)
         self.entry_port.pack(side=tk.LEFT, padx=5)
 
-        # 开机自启复选框（原先的桌面快捷方式自启，跟底层系统服务二选一，保留做轻量选项）
-        self.startup_var = tk.BooleanVar()
-        if sys.platform == 'win32':
-            cb_startup = ttk.Checkbutton(opts_frame, text="开机自启 (GUI启动)", variable=self.startup_var, command=self.toggle_startup)
-            cb_startup.pack(anchor=tk.W, pady=(5, 0))
-        else:
-            ttk.Label(opts_frame, text="(开机自启仅限 Windows)", state="disabled").pack(anchor=tk.W, pady=(5, 0))
-
-        # 运行后自动开启服务
+        # 自动开启服务（仅临时模式可见）
         self.auto_start_var = tk.BooleanVar(value=self.config.get("auto_start_service", False))
-        cb_auto_start = ttk.Checkbutton(opts_frame, text="软件运行时自动开启服务", variable=self.auto_start_var)
-        cb_auto_start.pack(anchor=tk.W, pady=(2, 0))
+        self.cb_auto_start = ttk.Checkbutton(opts_frame, text="软件运行时自动开启服务", variable=self.auto_start_var)
+        self.cb_auto_start.pack(anchor=tk.W, pady=(5, 0))
 
-        # 系统后台服务管理 (Windows 专属)
-        if sys.platform == 'win32' and win32serviceutil:
-            svc_frame = ttk.Frame(opts_frame)
-            svc_frame.pack(anchor=tk.W, fill=tk.X, pady=(10, 5))
-            ttk.Label(svc_frame, text="后台系统服务:").pack(side=tk.LEFT)
-            self.btn_install_svc = ttk.Button(svc_frame, text="安装服务", command=lambda: self.manage_system_service("install"))
-            self.btn_install_svc.pack(side=tk.LEFT, padx=5)
-            self.btn_remove_svc = ttk.Button(svc_frame, text="卸载服务", command=lambda: self.manage_system_service("remove"))
-            self.btn_remove_svc.pack(side=tk.LEFT)
+        # 开机自启（仅临时模式可见）
+        self.startup_var = tk.BooleanVar()
+        self.cb_startup = ttk.Checkbutton(opts_frame, text="开机自启 (GUI启动)",
+                                          variable=self.startup_var, command=self.toggle_startup)
+        if sys.platform == 'win32':
+            self.cb_startup.pack(anchor=tk.W, pady=(2, 0))
 
         # 密码验证配置
         self.use_auth_var = tk.BooleanVar(value=self.config.get("use_auth", False))
         self.username_var = tk.StringVar(value=self.config.get("username", "admin"))
-        # 密码从 base64 解码还原
         self.password_var = tk.StringVar(value=self._decode_password(self.config.get("password", "")))
 
         auth_frame = ttk.Frame(opts_frame)
         auth_frame.pack(anchor=tk.W, fill=tk.X, pady=(5, 0))
 
-        self.cb_auth = ttk.Checkbutton(auth_frame, text="启用访问密码", variable=self.use_auth_var, command=self.toggle_auth_ui)
+        self.cb_auth = ttk.Checkbutton(auth_frame, text="启用访问密码",
+                                       variable=self.use_auth_var, command=self.toggle_auth_ui)
         self.cb_auth.pack(anchor=tk.W)
 
         self.auth_input_frame = ttk.Frame(auth_frame)
-
         ttk.Label(self.auth_input_frame, text="账号:").pack(side=tk.LEFT)
         self.entry_user = ttk.Entry(self.auth_input_frame, textvariable=self.username_var, width=10)
         self.entry_user.pack(side=tk.LEFT, padx=(0, 5))
-
         ttk.Label(self.auth_input_frame, text="密码:").pack(side=tk.LEFT)
-        self.entry_pass = ttk.Entry(self.auth_input_frame, textvariable=self.password_var, width=10)
+        self.entry_pass = ttk.Entry(self.auth_input_frame, textvariable=self.password_var, width=10, show='*')
         self.entry_pass.pack(side=tk.LEFT)
-
-        # 初始化时根据勾选状态显示或隐藏密码输入框
+        self._pw_visible = False
+        self.btn_pw_toggle = ttk.Button(self.auth_input_frame, text="显示", width=4,
+                                        command=self._toggle_password_visibility)
+        self.btn_pw_toggle.pack(side=tk.LEFT, padx=(3, 0))
         self.toggle_auth_ui()
 
-        # 右侧：启动按钮
-        self.btn_start = ttk.Button(ctrl_frame, text="启动服务", style="Big.TButton", command=self.toggle_service)
-        self.btn_start.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0), ipadx=20)
+        # 右侧：动态按钮区（根据模式切换内容）
+        self.right_panel = ttk.Frame(ctrl_frame)
+        self.right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0))
+
+        # 临时模式按钮
+        self.btn_start = ttk.Button(self.right_panel, text="启动服务", style="Big.TButton", command=self.toggle_service)
+
+        # 常驻模式面板
+        self.svc_panel = ttk.Frame(self.right_panel)
+        self.svc_status_var = tk.StringVar(value="检测中...")
+        ttk.Label(self.svc_panel, textvariable=self.svc_status_var,
+                  font=("Microsoft YaHei", 10)).pack(pady=(5, 8))
+        self.btn_install_svc = ttk.Button(self.svc_panel, text="安装服务",
+                                          command=lambda: self.manage_system_service("install"))
+        self.btn_install_svc.pack(fill=tk.X, pady=2)
+        self.btn_remove_svc = ttk.Button(self.svc_panel, text="卸载服务",
+                                          command=lambda: self.manage_system_service("remove"))
+        self.btn_remove_svc.pack(fill=tk.X, pady=2)
 
         # 3. 日志窗口（只读但可选中复制）
-        log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        log_header = ttk.Frame(self.root)
+        log_header.pack(fill=tk.X, padx=10, pady=(5, 0))
+        ttk.Label(log_header, text="运行日志").pack(side=tk.LEFT)
+        ttk.Button(log_header, text="清空", width=4,
+                   command=lambda: self.log_text.delete('1.0', tk.END)).pack(side=tk.RIGHT)
+
+        log_frame = ttk.Frame(self.root, padding=(10, 2, 10, 5))
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=0)
 
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
@@ -474,20 +491,79 @@ class FTPApp:
         btn_help = ttk.Button(bottom_frame, text="帮助", command=self.show_help)
         btn_help.pack(side=tk.RIGHT, padx=2)
 
-        # 绑定所有变量的值变化监听以便实时保存配置
-        self.path_var.trace_add("write", lambda *args: self.save_config())
-        self.encoding_var.trace_add("write", lambda *args: self.save_config())
-        self.port_var.trace_add("write", lambda *args: self.save_config())
-        self.use_auth_var.trace_add("write", lambda *args: self.save_config())
-        self.username_var.trace_add("write", lambda *args: self.save_config())
-        self.password_var.trace_add("write", lambda *args: self.save_config())
-        self.auto_start_var.trace_add("write", lambda *args: self.save_config())
+        # 绑定变量变化监听，用防抖策略保存配置
+        for var in (self.path_var, self.encoding_var, self.port_var,
+                    self.use_auth_var, self.username_var, self.password_var,
+                    self.auto_start_var, self.mode_var):
+            var.trace_add("write", lambda *args: self._schedule_save())
 
     def toggle_auth_ui(self):
         if self.use_auth_var.get():
             self.auth_input_frame.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
         else:
             self.auth_input_frame.pack_forget()
+
+    def _toggle_password_visibility(self):
+        """切换密码框的显示/隐藏"""
+        self._pw_visible = not self._pw_visible
+        self.entry_pass.configure(show='' if self._pw_visible else '*')
+        self.btn_pw_toggle.configure(text='隐藏' if self._pw_visible else '显示')
+
+    def _apply_mode_ui(self):
+        """根据当前模式切换右侧按钮区和选项可见性"""
+        is_temp = self.mode_var.get() == 'temp'
+
+        # 右侧面板切换
+        if is_temp:
+            self.svc_panel.pack_forget()
+            self.btn_start.pack(fill=tk.BOTH, ipadx=20)
+        else:
+            self.btn_start.pack_forget()
+            self.svc_panel.pack(fill=tk.BOTH)
+            self._refresh_service_status()
+
+        # 临时模式专属选项可见性
+        if is_temp:
+            self.cb_auto_start.pack(anchor=tk.W, pady=(5, 0))
+            if sys.platform == 'win32':
+                self.cb_startup.pack(anchor=tk.W, pady=(2, 0))
+        else:
+            self.cb_auto_start.pack_forget()
+            self.cb_startup.pack_forget()
+
+        # 常驻模式下如果 GUI 服务正在运行，先停止它
+        if not is_temp and self.is_running:
+            self.ftp_server.stop_service()
+            self.is_running = False
+            self.status_var.set("状态: 已切换到常驻模式")
+
+    def _refresh_service_status(self):
+        """检测后台服务状态并更新 UI"""
+        running = self._is_service_running()
+        if running is None:
+            self.svc_status_var.set("⚪ 未安装")
+        elif running:
+            self.svc_status_var.set("🟢 服务运行中")
+        else:
+            self.svc_status_var.set("🔴 服务已停止")
+
+    def _is_service_running(self):
+        """检测 Windows 服务是否在运行。返回 True/False/None(未安装)"""
+        if not win32serviceutil:
+            return None
+        try:
+            status = win32serviceutil.QueryServiceStatus('FTPSimpleService')
+            return status[1] == win32service.SERVICE_RUNNING
+        except Exception:
+            return None
+
+    def _schedule_save(self):
+        """防抖保存：变量变化后 500ms 才真正写盘，避免每按一个键就触发全量 IO"""
+        if not self._ui_ready:
+            return
+        if self._save_timer:
+            self.root.after_cancel(self._save_timer)
+        self._save_timer = self.root.after(500, self.save_config)
 
     # --- 密码编解码（base64 视觉遮蔽，仅防止肉眼直读，并非安全加密） ---
 
@@ -522,10 +598,9 @@ class FTPApp:
         return {}
 
     def save_config(self):
-        # 在 UI 组件全部初始化完成之前不执行保存，避免 trace 回调触发时变量未就绪
         if not self._ui_ready:
             return
-
+        self._save_timer = None
         data = {
             "folder": self.path_var.get(),
             "encoding": self.encoding_var.get(),
@@ -533,7 +608,8 @@ class FTPApp:
             "use_auth": self.use_auth_var.get(),
             "username": self.username_var.get(),
             "password": self._encode_password(self.password_var.get()),
-            "auto_start_service": self.auto_start_var.get()
+            "auto_start_service": self.auto_start_var.get(),
+            "run_mode": self.mode_var.get()
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -698,34 +774,30 @@ class FTPApp:
             self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
     def manage_system_service(self, action):
-        """以管理员身份安装或卸载 Windows 背景服务（自动启动 + 立即运行）"""
+        """以管理员身份安装或卸载 Windows 服务（自动启动 + 立即运行）"""
         import ctypes
-        
-        # 必须先保存当前配置，因为服务启动时只读磁盘配置
         self.save_config()
 
-        if getattr(sys, 'frozen', False):
-            exe_path = sys.executable
-        else:
-            exe_path = sys.executable
+        exe_path = sys.executable
 
         if action == "install":
-            # 安装：install --startup auto，然后 net start 立即启动
+            # 安装服务前先停止 GUI 内的 FTP（避免端口冲突）
+            if self.is_running:
+                self.ftp_server.stop_service()
+                self.is_running = False
+                self.btn_start.configure(text="启动服务")
+
             if getattr(sys, 'frozen', False):
-                # 打包模式：用 cmd /c 串联多条命令，一次提权全部搞定
                 args = f'/c "{exe_path}" install --startup auto && net start FTPSimpleService'
-                target = "cmd.exe"
             else:
                 args = f'/c "{exe_path}" "{os.path.abspath(__file__)}" install --startup auto && net start FTPSimpleService'
-                target = "cmd.exe"
+            target = "cmd.exe"
         elif action == "remove":
-            # 卸载：先停止再卸载
             if getattr(sys, 'frozen', False):
                 args = f'/c net stop FTPSimpleService & "{exe_path}" remove'
-                target = "cmd.exe"
             else:
                 args = f'/c net stop FTPSimpleService & "{exe_path}" "{os.path.abspath(__file__)}" remove'
-                target = "cmd.exe"
+            target = "cmd.exe"
         else:
             target = exe_path
             args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
@@ -734,15 +806,39 @@ class FTPApp:
             ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 0)
             if ret > 32:
                 if action == "install":
-                    self.log_message("已申请管理员权限安装并启动后台服务。安装后服务将随电脑开机自动运行，无需登录桌面。")
+                    self.log_message("已申请管理员权限安装并启动后台服务。服务将随电脑开机自动运行。")
+                    # 自动注册 GUI 开机自启（确保托盘图标常在）
+                    self._register_gui_startup(True)
                 elif action == "remove":
                     self.log_message("已申请管理员权限停止并卸载后台服务。")
-                else:
-                    self.log_message(f"系统后台服务 [{action}] 命令已下发。")
+                # 延迟刷新服务状态（等待提权命令执行完）
+                self.root.after(3000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:
             self.log_message(f"执行服务命令失败: {e}")
+
+    def _register_gui_startup(self, enable):
+        """通过注册表设置/取消 GUI 开机自启"""
+        if sys.platform != 'win32':
+            return
+        try:
+            app_path = f'"{sys.executable}"'
+            if not getattr(sys, 'frozen', False):
+                app_path = f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                0, winreg.KEY_SET_VALUE)
+            if enable:
+                winreg.SetValueEx(key, "SimpleFTPServer", 0, winreg.REG_SZ, app_path)
+            else:
+                try:
+                    winreg.DeleteValue(key, "SimpleFTPServer")
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+        except Exception:
+            pass
 
     # --- 开机自启 (轻量 GUI 模式) ---
 

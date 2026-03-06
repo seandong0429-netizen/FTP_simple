@@ -794,15 +794,16 @@ class FTPApp:
 
         exe_path = sys.executable
         
-        # 使用系统临时目录生成脚本和日志，避免 ProgramData 等可能存在的权限或路径空格问题
-        temp_dir = tempfile.gettempdir()
-        svc_dir = os.path.join(temp_dir, 'FTP_Simple_Server')
-        os.makedirs(svc_dir, exist_ok=True)
-        svc_log = os.path.join(svc_dir, 'service_action.log')
-        bat_path = os.path.join(svc_dir, 'svc_action.bat')
+        # 将日志和脚本文件写在可执行文件同级目录，避免任何系统级目录带来的权限或虚拟化干扰
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(exe_path)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            
+        svc_log = os.path.join(base_dir, 'ServiceInstall_Action.log')
+        bat_path = os.path.join(base_dir, 'ServiceInstall_Action.bat')
 
-        self.log_message(f"[调试] service 脚本路径: {bat_path}")
-        self.log_message(f"[调试] service 日志路径: {svc_log}")
+        self.log_message(f"[调试] 准备写入安装脚本: {bat_path}")
 
         if action == "install":
             if self.is_running:
@@ -815,16 +816,36 @@ class FTPApp:
             else:
                 install_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
 
+            # == 核心逻辑修复 == 
+            # 1. 窗口必须要有回显，所以不能给 echo 加上 > log
+            # 2. 只有核心的 install_cmd 和 net start 才被追加写入 log 供后续排查
             bat_content = f'''@echo off
-echo [1/2] 正在安装服务... > "{svc_log}" 2>&1
-{install_cmd} >> "{svc_log}" 2>&1
-if %errorlevel% neq 0 echo 安装服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+echo =======================================================
+echo               FTP Simple Server 服务安装
+echo =======================================================
+echo.
+echo [1/2] 正在安装服务...
+echo   执行命令: {install_cmd}
+{install_cmd} > "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 安装服务失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 安装服务成功
+)
 
-echo [2/2] 正在启动服务... >> "{svc_log}" 2>&1
+echo.
+echo [2/2] 正在启动服务...
 net start FTPSimpleService >> "{svc_log}" 2>&1
-if %errorlevel% neq 0 echo 启动服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 启动服务失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 启动服务成功
+)
 
-echo 操作完成，按任意键关闭此窗口。 >> "{svc_log}" 2>&1
+echo.
+echo -------------------------------------------------------
+echo 附加调试信息已写入: {svc_log}
+echo 按任意键关闭此窗口...
 pause >nul
 '''
         elif action == "remove":
@@ -834,15 +855,26 @@ pause >nul
                 remove_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
 
             bat_content = f'''@echo off
-echo [1/2] 正在停止服务... > "{svc_log}" 2>&1
-net stop FTPSimpleService >> "{svc_log}" 2>&1
-if %errorlevel% neq 0 echo 停止服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+echo =======================================================
+echo               FTP Simple Server 服务卸载
+echo =======================================================
+echo.
+echo [1/2] 正在停止服务...
+net stop FTPSimpleService > "{svc_log}" 2>&1
 
-echo [2/2] 正在卸载服务... >> "{svc_log}" 2>&1
+echo.
+echo [2/2] 正在卸载服务...
 {remove_cmd} >> "{svc_log}" 2>&1
-if %errorlevel% neq 0 echo 卸载服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 卸载服务失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 卸载成功
+)
 
-echo 操作完成，按任意键关闭此窗口。 >> "{svc_log}" 2>&1
+echo.
+echo -------------------------------------------------------
+echo 附加调试信息已写入: {svc_log}
+echo 按任意键关闭此窗口...
 pause >nul
 '''
         else:

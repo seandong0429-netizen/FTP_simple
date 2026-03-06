@@ -438,6 +438,8 @@ class FTPApp:
         self.btn_remove_svc = ttk.Button(self.svc_panel, text="卸载服务",
                                           command=lambda: self.manage_system_service("remove"))
         self.btn_remove_svc.pack(fill=tk.X, pady=2)
+        ttk.Button(self.svc_panel, text="刷新状态",
+                   command=self._refresh_service_status).pack(fill=tk.X, pady=2)
 
         # 3. 日志窗口（只读但可选中复制）
         log_header = ttk.Frame(self.root)
@@ -990,10 +992,10 @@ class FTPSysService(BaseService):
     _svc_description_ = "轻量级 FTP 后台服务，让复印机扫描文件直达电脑。"
 
     # 关键：PyInstaller 打包后必须指定自身 exe 作为服务二进制
-    # 默认会注册 pythonservice.exe，在打包环境中根本不存在
+    # _exe_args_ 必须是空字符串，None 会让 pywin32 拼接不存在的脚本路径
     if getattr(sys, 'frozen', False):
         _exe_name_ = sys.executable
-        _exe_args_ = None
+        _exe_args_ = ""
 
     def __init__(self, args):
         if win32serviceutil:

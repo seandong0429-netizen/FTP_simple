@@ -872,6 +872,12 @@ class FTPSysService(BaseService):
     _svc_display_name_ = "云铠办公扫描服务"
     _svc_description_ = "轻量级 FTP 后台服务，让复印机扫描文件直达电脑。"
 
+    # 关键：PyInstaller 打包后必须指定自身 exe 作为服务二进制
+    # 默认会注册 pythonservice.exe，在打包环境中根本不存在
+    if getattr(sys, 'frozen', False):
+        _exe_name_ = sys.executable
+        _exe_args_ = None
+
     def __init__(self, args):
         if win32serviceutil:
             win32serviceutil.ServiceFramework.__init__(self, args)
@@ -906,6 +912,8 @@ class FTPSysService(BaseService):
         win32event.SetEvent(self.hWaitStop)
 
     def SvcDoRun(self):
+        # 向 SCM 报告服务正在启动
+        self.ReportServiceStatus(win32service.SERVICE_START_PENDING)
         self.running = True
         import base64
         port = int(self.config.get('port', 21))
@@ -918,41 +926,22 @@ class FTPSysService(BaseService):
         self._log_to_event(f"Starting FTP service on port {port}, folder {folder}")
         
         def run_server():
-            # BUG-4 FIX: 修正参数顺序，folder 是第一个位置参数
             self.server.start_service(folder, port=port, encoding=encoding,
                                       use_auth=use_auth, username=username, password=password)
 
         t = threading.Thread(target=run_server, daemon=True)
         t.start()
+
+        # 向 SCM 报告服务已成功启动（关键！缺少这一步 SCM 会认为服务超时未启动）
+        self.ReportServiceStatus(win32service.SERVICE_RUNNING)
         
         # 阻塞等待停止信号
         win32event.WaitForSingleObject(self.hWaitStop, win32event.INFINITE)
         self._log_to_event("FTP service stopped.")
 
 
-def main():
-    # 判断是否是通过系统服务管理器启动
-    if len(sys.argv) > 1 and win32serviceutil is not None:
-        try:
-            win32serviceutil.HandleCommandLine(FTPSysService)
-            return
-        except win32service.error as e:
-            if getattr(winerror, 'ERROR_FAILED_SVC_CONTROLLER_CONNECT', None) and e.winerror == winerror.ERROR_FAILED_SVC_CONTROLLER_CONNECT:
-                pass
-            else:
-                raise
-
-    # BUG-7 FIX: 安全检测是否在系统服务 session 0 中被启动（无参数情况）
-    try:
-        if win32serviceutil and servicemanager and servicemanager.RunningAsService():
-            servicemanager.Initialize()
-            servicemanager.PrepareToHostSingle(FTPSysService)
-            servicemanager.StartServiceCtrlDispatcher()
-            return
-    except Exception:
-        pass
-
-    # 以上都不是，正常启动 GUI
+def start_gui():
+    """启动 GUI 界面模式"""
     root = tk.Tk()
 
     # 单实例运行锁（通过绑定本地端口实现，同一时刻只允许一个实例运行）
@@ -980,8 +969,41 @@ def main():
     root.mainloop()
 
 
+def main():
+    """
+    程序入口点 —— 三种运行模式：
+    1. 命令行参数 (install/remove/start/stop) → 服务管理
+    2. SCM 启动 (无参数，但 StartServiceCtrlDispatcher 成功) → 后台服务
+    3. 用户双击 (无参数，StartServiceCtrlDispatcher 失败) → GUI
+    """
+    # 模式 1: 带参数启动，处理 install/remove/start/stop 等服务管理命令
+    if len(sys.argv) > 1 and win32serviceutil is not None:
+        win32serviceutil.HandleCommandLine(FTPSysService)
+        return
+
+    # 模式 2 & 3: 无参数启动，尝试作为服务连接 SCM
+    if win32serviceutil is not None:
+        try:
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(FTPSysService)
+            servicemanager.StartServiceCtrlDispatcher()
+            # 如果上面成功了，说明是 SCM 启动的，服务已在运行
+            return
+        except win32service.error as details:
+            # ERROR_FAILED_SVC_CONTROLLER_CONNECT (1063):
+            # 说明不是 SCM 启动的，是用户双击的 → 回退到 GUI
+            if details.winerror == winerror.ERROR_FAILED_SVC_CONTROLLER_CONNECT:
+                pass
+            else:
+                raise
+
+    # 模式 3: 正常启动 GUI
+    start_gui()
+
+
 if __name__ == "__main__":
     import multiprocessing
     # 修复 Windows 下打包成 exe 后可能由于第三方库触发多进程而导致的无限重启（Fork 炸弹）问题
     multiprocessing.freeze_support()
     main()
+

@@ -789,12 +789,20 @@ class FTPApp:
     def manage_system_service(self, action):
         """以管理员身份安装或卸载 Windows 服务"""
         import ctypes
+        import tempfile
         self.save_config()
 
         exe_path = sys.executable
-        log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
-        os.makedirs(log_dir, exist_ok=True)
-        bat_path = os.path.join(log_dir, 'svc_action.bat')
+        
+        # 使用系统临时目录生成脚本和日志，避免 ProgramData 等可能存在的权限或路径空格问题
+        temp_dir = tempfile.gettempdir()
+        svc_dir = os.path.join(temp_dir, 'FTP_Simple_Server')
+        os.makedirs(svc_dir, exist_ok=True)
+        svc_log = os.path.join(svc_dir, 'service_action.log')
+        bat_path = os.path.join(svc_dir, 'svc_action.bat')
+
+        self.log_message(f"[调试] service 脚本路径: {bat_path}")
+        self.log_message(f"[调试] service 日志路径: {svc_log}")
 
         if action == "install":
             if self.is_running:
@@ -808,13 +816,15 @@ class FTPApp:
                 install_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
 
             bat_content = f'''@echo off
-echo [1/2] 正在安装服务...
-{install_cmd}
-echo.
-echo [2/2] 正在启动服务...
-net start FTPSimpleService
-echo.
-echo 操作完成，按任意键关闭此窗口。
+echo [1/2] 正在安装服务... > "{svc_log}" 2>&1
+{install_cmd} >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 echo 安装服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+
+echo [2/2] 正在启动服务... >> "{svc_log}" 2>&1
+net start FTPSimpleService >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 echo 启动服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+
+echo 操作完成，按任意键关闭此窗口。 >> "{svc_log}" 2>&1
 pause >nul
 '''
         elif action == "remove":
@@ -824,13 +834,15 @@ pause >nul
                 remove_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
 
             bat_content = f'''@echo off
-echo [1/2] 正在停止服务...
-net stop FTPSimpleService
-echo.
-echo [2/2] 正在卸载服务...
-{remove_cmd}
-echo.
-echo 操作完成，按任意键关闭此窗口。
+echo [1/2] 正在停止服务... > "{svc_log}" 2>&1
+net stop FTPSimpleService >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 echo 停止服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+
+echo [2/2] 正在卸载服务... >> "{svc_log}" 2>&1
+{remove_cmd} >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 echo 卸载服务失败，错误码 %errorlevel% >> "{svc_log}" 2>&1
+
+echo 操作完成，按任意键关闭此窗口。 >> "{svc_log}" 2>&1
 pause >nul
 '''
         else:
@@ -844,19 +856,21 @@ pause >nul
             return
 
         try:
+            # 提权执行 bat 文件
             ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat_path, None, None, 1)
             if ret > 32:
                 if action == "install":
                     self.log_message("已申请管理员权限安装服务，请在弹出的窗口查看结果...")
                     self._register_gui_startup(True)
                 elif action == "remove":
-                    self.log_message("已申请管理员权限卸载服务...")
+                    self.log_message("已申请管理员权限卸载服务，请在弹出的窗口查看结果...")
+                # 延迟读取日志并刷新状态
+                self.root.after(8000, lambda: self._read_svc_log(svc_log))
                 self.root.after(8000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:
             self.log_message(f"执行服务命令失败: {e}")
-
     def _read_svc_log(self, log_path):
         """读取服务安装日志并显示在 GUI 中"""
         try:
@@ -1149,10 +1163,7 @@ def main():
     if sys.stderr is None:
         sys.stderr = open(os.devnull, 'w')
 
-    # 模式 1: 带参数启动，处理 install/remove/start/stop 等服务管理命令
-    if len(sys.argv) > 1 and win32serviceutil is not None:
-        win32serviceutil.HandleCommandLine(FTPSysService)
-        return
+
 
     # 模式 2 & 3: 无参数启动，尝试作为服务连接 SCM
     if win32serviceutil is not None:

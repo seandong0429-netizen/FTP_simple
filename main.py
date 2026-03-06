@@ -698,26 +698,47 @@ class FTPApp:
             self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
     def manage_system_service(self, action):
-        """以管理员身份安装或卸载 Windows 背景服务"""
+        """以管理员身份安装或卸载 Windows 背景服务（自动启动 + 立即运行）"""
         import ctypes
         
         # 必须先保存当前配置，因为服务启动时只读磁盘配置
         self.save_config()
-        
-        # BUG-6 FIX: 统一参数拼接逻辑
+
         if getattr(sys, 'frozen', False):
-            # 打包后的 exe 模式：exe 本身就是入口
             exe_path = sys.executable
-            args = action
         else:
-            # 脚本开发模式：python.exe + 脚本路径 + 动作
             exe_path = sys.executable
-            args = f'"{os.path.abspath(__file__)}" {action}'
+
+        if action == "install":
+            # 安装：install --startup auto，然后 net start 立即启动
+            if getattr(sys, 'frozen', False):
+                # 打包模式：用 cmd /c 串联多条命令，一次提权全部搞定
+                args = f'/c "{exe_path}" install --startup auto && net start FTPSimpleService'
+                target = "cmd.exe"
+            else:
+                args = f'/c "{exe_path}" "{os.path.abspath(__file__)}" install --startup auto && net start FTPSimpleService'
+                target = "cmd.exe"
+        elif action == "remove":
+            # 卸载：先停止再卸载
+            if getattr(sys, 'frozen', False):
+                args = f'/c net stop FTPSimpleService & "{exe_path}" remove'
+                target = "cmd.exe"
+            else:
+                args = f'/c net stop FTPSimpleService & "{exe_path}" "{os.path.abspath(__file__)}" remove'
+                target = "cmd.exe"
+        else:
+            target = exe_path
+            args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
 
         try:
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_path, args, None, 1)
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 0)
             if ret > 32:
-                self.log_message(f"系统后台服务 [{action}] 命令已下发执行。请在 services.msc 中检查 [云铠办公扫描服务] 状态。")
+                if action == "install":
+                    self.log_message("已申请管理员权限安装并启动后台服务。安装后服务将随电脑开机自动运行，无需登录桌面。")
+                elif action == "remove":
+                    self.log_message("已申请管理员权限停止并卸载后台服务。")
+                else:
+                    self.log_message(f"系统后台服务 [{action}] 命令已下发。")
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:

@@ -1106,10 +1106,12 @@ def main():
             servicemanager.StartServiceCtrlDispatcher()
             # 如果上面成功了，说明是 SCM 启动的，服务已在运行
             return
-        except win32service.error as details:
+        except Exception as details:
             # ERROR_FAILED_SVC_CONTROLLER_CONNECT (1063):
             # 说明不是 SCM 启动的，是用户双击的 → 回退到 GUI
-            if details.winerror == 1063:  # ERROR_FAILED_SVC_CONTROLLER_CONNECT
+            # NOTE: 实际异常类型是 pywintypes.error，不是 win32service.error
+            err_code = getattr(details, 'winerror', None) or (details.args[0] if details.args else 0)
+            if err_code == 1063:
                 pass
             else:
                 raise

@@ -440,17 +440,21 @@ class FTPApp:
 
         # 常驻模式面板
         self.svc_panel = ttk.Frame(self.right_panel)
-        self.svc_status_var = tk.StringVar(value="检测中...")
-        ttk.Label(self.svc_panel, textvariable=self.svc_status_var,
-                  font=("Microsoft YaHei", 10)).pack(pady=(5, 8))
+        # 抛弃 textvariable, 改用直接控制 Label 的 text 和 fg，以支持纯黑文字或彩色文字
+        self.svc_status_label = tk.Label(self.svc_panel, text="检测中...", font=("Microsoft YaHei", 10))
+        self.svc_status_label.pack(pady=(5, 8))
+        
+        # 服务控制按钮，按状态动态排布
+        self.btn_start_svc = ttk.Button(self.svc_panel, text="启动服务",
+                                        command=lambda: self.manage_system_service("start"))
+        self.btn_stop_svc = ttk.Button(self.svc_panel, text="停止服务",
+                                       command=lambda: self.manage_system_service("stop"))
         self.btn_install_svc = ttk.Button(self.svc_panel, text="安装服务",
                                           command=lambda: self.manage_system_service("install"))
-        self.btn_install_svc.pack(fill=tk.X, pady=2)
         self.btn_remove_svc = ttk.Button(self.svc_panel, text="卸载服务",
                                           command=lambda: self.manage_system_service("remove"))
-        self.btn_remove_svc.pack(fill=tk.X, pady=2)
-        ttk.Button(self.svc_panel, text="刷新状态",
-                   command=self._refresh_service_status).pack(fill=tk.X, pady=2)
+        self.btn_refresh_svc = ttk.Button(self.svc_panel, text="刷新状态",
+                                          command=self._refresh_service_status)
 
         # 3. 日志窗口（只读但可选中复制）
         log_header = ttk.Frame(self.root)
@@ -551,24 +555,65 @@ class FTPApp:
             self.status_var.set("状态: 已切换到常驻模式")
 
     def _refresh_service_status(self):
-        """检测后台服务状态并更新 UI"""
-        running = self._is_service_running()
-        if running is None:
-            self.svc_status_var.set("⚪ 未安装")
-        elif running:
-            self.svc_status_var.set("🟢 服务运行中")
-        else:
-            self.svc_status_var.set("🔴 服务已停止")
+        """检测后台服务状态并动态更新 UI 和控制按钮"""
+        status = self._get_service_status()
+        
+        # 清空当前的所有常驻模式按钮排布
+        for btn in (self.btn_install_svc, self.btn_start_svc, self.btn_stop_svc, self.btn_remove_svc, self.btn_refresh_svc):
+            btn.pack_forget()
 
-    def _is_service_running(self):
-        """检测 Windows 服务是否在运行。返回 True/False/None(未安装)"""
+        if status is None:
+            # 未安装：显示 ⚪ 未安装，仅保留安装按钮
+            self.svc_status_label.config(text="⚪ 未安装", fg="gray")
+            self.status_var.set("状态: 常驻服务未安装")
+            self.btn_install_svc.pack(fill=tk.X, pady=2)
+            self._last_svc_running = False
+        elif status == 'running':
+            # 运行中：🟢 显示绿色字体，保留停止、卸载按钮
+            self.svc_status_label.config(text="🟢 服务运行中", fg="green")
+            self.status_var.set("状态: 常驻服务运行中")
+            self.btn_stop_svc.pack(fill=tk.X, pady=2)
+            self.btn_remove_svc.pack(fill=tk.X, pady=2)
+            
+            # 从非运行变成运行状态时，打印推荐访问日志
+            if not getattr(self, '_last_svc_running', False):
+                self._print_service_access_log()
+            self._last_svc_running = True
+        else:
+            # 已停止：🔴 显示红色字体，保留启动、卸载按钮
+            self.svc_status_label.config(text="🔴 服务已停止", fg="red")
+            self.status_var.set("状态: 常驻服务已停止")
+            self.btn_start_svc.pack(fill=tk.X, pady=2)
+            self.btn_remove_svc.pack(fill=tk.X, pady=2)
+            self._last_svc_running = False
+            
+        # 无论什么状态都把刷新按钮放最底下
+        self.btn_refresh_svc.pack(fill=tk.X, pady=2)
+
+    def _get_service_status(self):
+        """检测 Windows 服务详细状态。返回 'running', 'stopped', None(未安装)"""
         if not win32serviceutil:
             return None
         try:
             status = win32serviceutil.QueryServiceStatus('FTPSimpleService')
-            return status[1] == win32service.SERVICE_RUNNING
+            if status[1] == win32service.SERVICE_RUNNING:
+                return 'running'
+            else:
+                return 'stopped'
         except Exception:
             return None
+
+    def _print_service_access_log(self):
+        """打印常驻模式运行时的访问地址信息"""
+        port = self.port_var.get()
+        ips = SimpleFTPServer.get_local_ips()
+        ip_str = ips[0] if ips else "127.0.0.1"
+        self.log_message(f"--- 后台常驻服务已开始运行 ---")
+        self.log_message(f"推荐访问地址: ftp://{ip_str}:{port}/")
+        if len(ips) > 1:
+            self.log_message("其他可用局域网地址:")
+            for ip in ips[1:]:
+                self.log_message(f"  ftp://{ip}:{port}/")
 
     def _schedule_save(self):
         """防抖保存：变量变化后 500ms 才真正写盘，避免每按一个键就触发全量 IO"""
@@ -857,6 +902,46 @@ if %errorlevel% neq 0 (
     sc qc FTPSimpleService >> "{svc_log}" 2>&1
 ) else (
     echo   [ok] 启动服务成功
+)
+
+echo.
+echo -------------------------------------------------------
+echo 附加调试信息已写入: {svc_log}
+echo 按任意键关闭此窗口...
+pause >nul
+'''
+        elif action == "start":
+            bat_content = f'''@echo off
+echo =======================================================
+echo               FTP Simple Server 服务启动
+echo =======================================================
+echo.
+echo 正在启动服务...
+net start FTPSimpleService > "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 启动服务失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 启动服务成功
+)
+
+echo.
+echo -------------------------------------------------------
+echo 附加调试信息已写入: {svc_log}
+echo 按任意键关闭此窗口...
+pause >nul
+'''
+        elif action == "stop":
+            bat_content = f'''@echo off
+echo =======================================================
+echo               FTP Simple Server 服务停止
+echo =======================================================
+echo.
+echo 正在停止服务...
+net stop FTPSimpleService > "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 停止服务失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 停止服务成功
 )
 
 echo.

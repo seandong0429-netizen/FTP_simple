@@ -781,6 +781,9 @@ class FTPApp:
         self.save_config()
 
         exe_path = sys.executable
+        # 日志文件：记录提权命令的输出便于排错
+        log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
+        svc_log = os.path.join(log_dir, 'service_install.log')
 
         if action == "install":
             # 安装服务前先停止 GUI 内的 FTP（避免端口冲突）
@@ -790,35 +793,50 @@ class FTPApp:
                 self.btn_start.configure(text="启动服务")
 
             if getattr(sys, 'frozen', False):
-                args = f'/c "{exe_path}" install --startup auto && net start FTPSimpleService'
+                cmd = f'"{exe_path}" install --startup auto'
             else:
-                args = f'/c "{exe_path}" "{os.path.abspath(__file__)}" install --startup auto && net start FTPSimpleService'
+                cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
+            # 安装 → 启动，输出写入日志
+            args = f'/c ({cmd} && net start FTPSimpleService) > "{svc_log}" 2>&1 & echo. >> "{svc_log}" & echo EXIT_CODE:%errorlevel% >> "{svc_log}"'
             target = "cmd.exe"
         elif action == "remove":
             if getattr(sys, 'frozen', False):
-                args = f'/c net stop FTPSimpleService & "{exe_path}" remove'
+                cmd = f'"{exe_path}" remove'
             else:
-                args = f'/c net stop FTPSimpleService & "{exe_path}" "{os.path.abspath(__file__)}" remove'
+                cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
+            args = f'/c (net stop FTPSimpleService & {cmd}) > "{svc_log}" 2>&1'
             target = "cmd.exe"
         else:
             target = exe_path
             args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
 
         try:
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 0)
+            # nShowCmd=1 让 cmd 窗口可见，方便用户看到 UAC 后的执行情况
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 1)
             if ret > 32:
                 if action == "install":
-                    self.log_message("已申请管理员权限安装并启动后台服务。服务将随电脑开机自动运行。")
-                    # 自动注册 GUI 开机自启（确保托盘图标常在）
+                    self.log_message("已申请管理员权限安装服务，请在弹出的命令行窗口中查看结果...")
                     self._register_gui_startup(True)
                 elif action == "remove":
-                    self.log_message("已申请管理员权限停止并卸载后台服务。")
-                # 延迟刷新服务状态（等待提权命令执行完）
-                self.root.after(3000, self._refresh_service_status)
+                    self.log_message("已申请管理员权限卸载服务...")
+                # 延迟读取日志文件并刷新状态
+                self.root.after(5000, lambda: self._read_svc_log(svc_log))
+                self.root.after(5000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:
             self.log_message(f"执行服务命令失败: {e}")
+
+    def _read_svc_log(self, log_path):
+        """读取服务安装日志并显示在 GUI 中"""
+        try:
+            if os.path.exists(log_path):
+                with open(log_path, 'r', encoding='gbk', errors='replace') as f:
+                    content = f.read().strip()
+                if content:
+                    self.log_message(f"--- 服务安装日志 ---\n{content}\n--- 日志结束 ---")
+        except Exception as e:
+            self.log_message(f"读取服务日志失败: {e}")
 
     def _register_gui_startup(self, enable):
         """通过注册表设置/取消 GUI 开机自启"""

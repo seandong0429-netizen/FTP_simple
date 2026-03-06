@@ -314,7 +314,18 @@ class FTPApp:
 
         # 根据选择的模式执行不同的自启逻辑
         self._apply_mode_ui()
-        if self.mode_var.get() == 'temp':
+
+        # 启动时主动检测后台服务状态，避免 GUI 与服务状态割裂
+        if self._is_service_running():
+            self.status_var.set("状态: 后台服务运行中")
+            self.btn_start.configure(text="后台服务运行中", state='disabled')
+            self.log_message("检测到 Windows 后台服务正在运行，FTP 已通过服务提供。如需修改配置，请切换到常驻模式管理。")
+            # 如果服务在跑但模式是临时，自动切到常驻模式
+            if self.mode_var.get() == 'temp':
+                self.mode_var.set('service')
+                self._apply_mode_ui()
+            self.root.after(500, self.hide_window)
+        elif self.mode_var.get() == 'temp':
             if self.auto_start_var.get():
                 self.root.after(500, self._auto_start_and_minimize)
         else:
@@ -796,15 +807,16 @@ class FTPApp:
                 cmd = f'"{exe_path}" install --startup auto'
             else:
                 cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
-            # 安装 → 启动，输出写入日志
-            args = f'/c ({cmd} && net start FTPSimpleService) > "{svc_log}" 2>&1 & echo. >> "{svc_log}" & echo EXIT_CODE:%errorlevel% >> "{svc_log}"'
+            # NOTE: cmd /c 的引号剥离特性——当命令首尾都有双引号时会剥掉最外层
+            # 解决方案：用一层最外双引号包裹整个命令
+            args = f'/c "({cmd} && net start FTPSimpleService) > "{svc_log}" 2>&1"'
             target = "cmd.exe"
         elif action == "remove":
             if getattr(sys, 'frozen', False):
                 cmd = f'"{exe_path}" remove'
             else:
                 cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
-            args = f'/c (net stop FTPSimpleService & {cmd}) > "{svc_log}" 2>&1'
+            args = f'/c "(net stop FTPSimpleService & {cmd}) > "{svc_log}" 2>&1"'
             target = "cmd.exe"
         else:
             target = exe_path

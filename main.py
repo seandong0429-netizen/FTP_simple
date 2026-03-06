@@ -189,23 +189,63 @@ class SimpleFTPServer:
                 return "127.0.0.1"
 
     def get_all_ips(self):
+        """基于 psutil 物理网卡遍历获取 IP 地址，自动去重、过滤虚拟网卡。IPv6 优先 fe80 本地链接。"""
         v4_ips = set()
         v6_ips = set()
         try:
-            # 获取本机所有地址信息
-            addr_infos = socket.getaddrinfo(socket.gethostname(), None)
-            for info in addr_infos:
-                family, _, _, _, sockaddr = info
-                ip = sockaddr[0]
-                if family == socket.AF_INET and not ip.startswith("127."):
-                    # 对于 IPv4，剔除 Windows 常见的 169.254.x.x 自动专有 IP，并去重
-                    if not ip.startswith("169.254."):
-                        v4_ips.add(ip)
-                elif family == socket.AF_INET6 and not ip.startswith("::1"):
-                    # 如果 IPv6 包含作用域 (即 %xxx)，我们可以选择展示它或者截断
-                    v6_ips.add(ip)
+            interfaces = psutil.net_if_addrs()
+            stats = psutil.net_if_stats()
+
+            for iface_name, addrs in interfaces.items():
+                # 跳过未启用的网卡
+                if iface_name in stats and not stats[iface_name].isup:
+                    continue
+                # 跳过虚拟/回环网卡
+                lower_name = iface_name.lower()
+                if any(kw in lower_name for kw in ("loopback", "vmware", "virtualbox", "vethernet", "wsl", "docker", "vbox")):
+                    continue
+
+                best_v4 = None
+                v6_candidates = []
+
+                for addr in addrs:
+                    ip = addr.address
+                    if addr.family == socket.AF_INET:
+                        if not ip.startswith("127.") and not ip.startswith("169.254."):
+                            best_v4 = ip
+                    elif addr.family == socket.AF_INET6:
+                        # 去除 Windows 可能附带的 scope id (如 %12)
+                        clean_ip = ip.split('%')[0]
+                        if not clean_ip.startswith("::1"):
+                            weight = 0
+                            if clean_ip.lower().startswith("fe80"):
+                                weight = 100  # 用户首选：固定在物理网卡上，不随路由变化
+                            elif clean_ip.lower().startswith("fd") or clean_ip.lower().startswith("fc"):
+                                weight = 80
+                            elif clean_ip.startswith("2"):
+                                weight = 50
+                            v6_candidates.append((weight, ip))  # 保留原始 ip（含 scope）
+
+                if best_v4:
+                    v4_ips.add(best_v4)
+
+                if v6_candidates:
+                    v6_candidates.sort(key=lambda x: x[0], reverse=True)
+                    v6_ips.add(v6_candidates[0][1])
+
         except Exception as e:
-            self.log(f"获取网卡 IP 失败: {e}")
+            self.log(f"psutil 获取网卡失败，降级到 socket: {e}")
+            try:
+                addr_infos = socket.getaddrinfo(socket.gethostname(), None)
+                for info in addr_infos:
+                    family, _, _, _, sockaddr = info
+                    ip = sockaddr[0]
+                    if family == socket.AF_INET and not ip.startswith("127.") and not ip.startswith("169.254."):
+                        v4_ips.add(ip)
+                    elif family == socket.AF_INET6 and not ip.startswith("::1"):
+                        v6_ips.add(ip)
+            except Exception:
+                pass
 
         return list(v4_ips), list(v6_ips)
 
@@ -241,8 +281,9 @@ class FTPApp:
 
     def __init__(self, root):
         self.root = root
-        self.ftp_server = SimpleFTPServer() # Modified: Removed self.log_message from constructor
-        self.server_thread = None # Added: Initialize server_thread
+        self.ftp_server = SimpleFTPServer()
+        self.ftp_server.logger_func = self.log_message  # BUG-1 FIX: 恢复日志回调，确保服务日志显示在 GUI
+        self.server_thread = None
         self.is_running = False
         self.tray_icon = None
         self._ui_ready = False  # UI 初始化完成标志，防止 trace 回调在组件未就绪时触发保存
@@ -387,18 +428,40 @@ class FTPApp:
         self.btn_start = ttk.Button(ctrl_frame, text="启动服务", style="Big.TButton", command=self.toggle_service)
         self.btn_start.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(5, 0), ipadx=20)
 
-        # 3. 日志窗口
+        # 3. 日志窗口（只读但可选中复制）
         log_frame = ttk.LabelFrame(self.root, text="运行日志", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        # 绑定特定事件，实现只读但允许复制的效果
         self.log_text = scrolledtext.ScrolledText(log_frame, height=10, font=("Consolas", 9))
         self.log_text.pack(fill=tk.BOTH, expand=True)
-        # 禁止键盘按键输入，但保留 Ctrl+C (Command+C) 复制快捷键
-        self.log_text.bind("<Key>", lambda e: "break" if e.state & 0x4 == 0 and e.keysym not in ("c", "C") else None)
-        # 防止退格键或回车等其他输入
-        self.log_text.bind("<BackSpace>", lambda e: "break")
-        self.log_text.bind("<Return>", lambda e: "break")
+
+        # BUG-5 FIX: 用白名单策略实现只读可复制，放行所有导航和选择操作
+        def _on_key(event):
+            # 放行 Ctrl/Command 组合键（复制、全选等）
+            if event.state & 0x4 or event.state & 0x8:  # Ctrl or Meta
+                return None
+            # 放行纯导航键
+            if event.keysym in ('Left', 'Right', 'Up', 'Down', 'Home', 'End',
+                                'Prior', 'Next', 'Shift_L', 'Shift_R',
+                                'Control_L', 'Control_R', 'Alt_L', 'Alt_R',
+                                'Caps_Lock', 'Escape', 'F1', 'F2', 'F3', 'F4',
+                                'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12'):
+                return None
+            # 拦截所有其他输入（字母/数字/退格/回车/删除等）
+            return "break"
+
+        self.log_text.bind("<Key>", _on_key)
+
+        # OPT-1: 添加右键上下文菜单
+        self._log_context_menu = tk.Menu(self.log_text, tearoff=0)
+        self._log_context_menu.add_command(label="复制", command=lambda: self.root.focus_get().event_generate('<<Copy>>'))
+        self._log_context_menu.add_command(label="全选", command=lambda: (self.log_text.tag_add('sel', '1.0', 'end'), None)[-1])
+
+        def _show_log_menu(event):
+            self._log_context_menu.tk_popup(event.x_root, event.y_root)
+
+        self.log_text.bind("<Button-3>", _show_log_menu)  # Windows 右键
+        self.log_text.bind("<Button-2>", _show_log_menu)  # macOS 右键
 
         # 4. 底部状态栏（左侧状态 + 右侧帮助按钮）
         bottom_frame = ttk.Frame(self.root)
@@ -641,15 +704,20 @@ class FTPApp:
         # 必须先保存当前配置，因为服务启动时只读磁盘配置
         self.save_config()
         
-        exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
-        args = f'"{exe_path}" {action}' if not getattr(sys, 'frozen', False) else action
+        # BUG-6 FIX: 统一参数拼接逻辑
+        if getattr(sys, 'frozen', False):
+            # 打包后的 exe 模式：exe 本身就是入口
+            exe_path = sys.executable
+            args = action
+        else:
+            # 脚本开发模式：python.exe + 脚本路径 + 动作
+            exe_path = sys.executable
+            args = f'"{os.path.abspath(__file__)}" {action}'
 
-        # 提权调用自身
         try:
-            # ShellExecuteW: hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShowCmd
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, args, None, 1)
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe_path, args, None, 1)
             if ret > 32:
-                self.log_message(f"系统后台服务 [{action}] 命令已下发执行。提示: 请确保在服务管理组件(services.msc)中检查 [云铠办公扫描服务] 状态。")
+                self.log_message(f"系统后台服务 [{action}] 命令已下发执行。请在 services.msc 中检查 [云铠办公扫描服务] 状态。")
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:
@@ -822,7 +890,7 @@ class FTPSysService(BaseService):
             except Exception:
                 pass
 
-        self.server.log_callback = self._log_to_event
+        self.server.logger_func = self._log_to_event  # BUG-3 FIX: 正确的属性名
         self.running = False
 
     def _log_to_event(self, msg):
@@ -850,7 +918,9 @@ class FTPSysService(BaseService):
         self._log_to_event(f"Starting FTP service on port {port}, folder {folder}")
         
         def run_server():
-            self.server.start_service(port, folder, encoding, use_auth, username, password)
+            # BUG-4 FIX: 修正参数顺序，folder 是第一个位置参数
+            self.server.start_service(folder, port=port, encoding=encoding,
+                                      use_auth=use_auth, username=username, password=password)
 
         t = threading.Thread(target=run_server, daemon=True)
         t.start()
@@ -872,12 +942,15 @@ def main():
             else:
                 raise
 
-    # 如果在系统服务 session 0 中直接被启动（无参数情况）
-    if win32serviceutil and servicemanager.RunningAsService():
-        servicemanager.Initialize()
-        servicemanager.PrepareToHostSingle(FTPSysService)
-        servicemanager.StartServiceCtrlDispatcher()
-        return
+    # BUG-7 FIX: 安全检测是否在系统服务 session 0 中被启动（无参数情况）
+    try:
+        if win32serviceutil and servicemanager and servicemanager.RunningAsService():
+            servicemanager.Initialize()
+            servicemanager.PrepareToHostSingle(FTPSysService)
+            servicemanager.StartServiceCtrlDispatcher()
+            return
+    except Exception:
+        pass
 
     # 以上都不是，正常启动 GUI
     root = tk.Tk()

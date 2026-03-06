@@ -585,6 +585,8 @@ class FTPApp:
             self.status_var.set("状态: 常驻服务已停止")
             self.btn_start_svc.pack(fill=tk.X, pady=2)
             self.btn_remove_svc.pack(fill=tk.X, pady=2)
+            # 用户可能需要覆盖安装，虽然是停止状态，也允许点击安装服务
+            self.btn_install_svc.pack(fill=tk.X, pady=2)
             self._last_svc_running = False
             
         # 无论什么状态都把刷新按钮放最底下
@@ -920,6 +922,10 @@ echo 正在启动服务...
 net start FTPSimpleService > "{svc_log}" 2>&1
 if %errorlevel% neq 0 (
     echo   [!] 启动服务失败，错误码 %errorlevel% 
+    echo       此类错误通常是因为旧版路径记录遗留，或软件存放在“桌面”等无权限目录。
+    echo       推荐：1. 点击 [卸载服务] 再 [安装服务] 重新注册。 2. 将软件移至 C 盘根目录。
+    echo   -- 附加诊断信息 -- >> "{svc_log}" 2>&1
+    sc qc FTPSimpleService >> "{svc_log}" 2>&1
 ) else (
     echo   [ok] 启动服务成功
 )

@@ -1147,7 +1147,9 @@ def main():
     """
     # 模式 1: 带参数启动，处理 install/remove/start/stop 等服务管理命令
     if len(sys.argv) > 1 and win32serviceutil is not None:
-        win32serviceutil.HandleCommandLine(FTPSysService)
+        # NOTE: 必须显式传 serviceClassString，否则 pywin32 会尝试读取 __file__
+        # 在 PyInstaller 打包环境中 __file__ 指向临时解压目录，导致安装失败
+        win32serviceutil.HandleCommandLine(FTPSysService, serviceClassString='main.FTPSysService')
         return
 
     # 模式 2 & 3: 无参数启动，尝试作为服务连接 SCM

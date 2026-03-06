@@ -1086,10 +1086,10 @@ class FTPSysService(BaseService):
     _svc_description_ = "轻量级 FTP 后台服务，让复印机扫描文件直达电脑。"
 
     # 关键：PyInstaller 打包后必须指定自身 exe 作为服务二进制
-    # _exe_args_ 必须是空字符串，None 会让 pywin32 拼接不存在的脚本路径
     if getattr(sys, 'frozen', False):
         _exe_name_ = sys.executable
-        _exe_args_ = ""
+        # 为了避免 pywin32 默认寻找基于脚本的路径，使用自定义标志绕过默认拼接
+        _exe_args_ = '"' + sys.executable + '"'
 
     def __init__(self, args):
         if win32serviceutil:

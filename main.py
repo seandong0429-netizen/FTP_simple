@@ -1109,7 +1109,7 @@ def main():
         except win32service.error as details:
             # ERROR_FAILED_SVC_CONTROLLER_CONNECT (1063):
             # 说明不是 SCM 启动的，是用户双击的 → 回退到 GUI
-            if details.winerror == winerror.ERROR_FAILED_SVC_CONTROLLER_CONNECT:
+            if details.winerror == 1063:  # ERROR_FAILED_SVC_CONTROLLER_CONNECT
                 pass
             else:
                 raise

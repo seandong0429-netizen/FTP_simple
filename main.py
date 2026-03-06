@@ -792,10 +792,9 @@ class FTPApp:
         self.save_config()
 
         exe_path = sys.executable
-        log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
-        os.makedirs(log_dir, exist_ok=True)
-        svc_log = os.path.join(log_dir, 'service_install.log')
-        bat_path = os.path.join(log_dir, 'svc_action.bat')
+
+        # 使用 /k 保留命令行窗口便于排查错误（测试没问题后可改回 /c 让窗口自动关闭）
+        cmd_switch = "/k"
 
         if action == "install":
             if self.is_running:
@@ -804,55 +803,29 @@ class FTPApp:
                 self.btn_start.configure(text="启动服务")
 
             if getattr(sys, 'frozen', False):
-                install_cmd = f'"{exe_path}" install --startup auto'
+                # 重点：命令最外层必须有一对双引号，防止 cmd /c 剥离引号导致空格路径截断
+                args = f'{cmd_switch} ""{exe_path}" install --startup auto && net start FTPSimpleService"'
             else:
-                install_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
-
-            # 写入 bat 文件，每条命令独立一行，彻底避免 cmd /c 引号地狱
-            bat_content = f'''@echo off
-echo ====== 安装服务 ====== > "{svc_log}"
-{install_cmd} >> "{svc_log}" 2>&1
-echo. >> "{svc_log}"
-echo ====== 启动服务 ====== >> "{svc_log}"
-net start FTPSimpleService >> "{svc_log}" 2>&1
-echo. >> "{svc_log}"
-echo EXIT_CODE:%errorlevel% >> "{svc_log}"
-'''
+                args = f'{cmd_switch} ""{exe_path}" "{os.path.abspath(__file__)}" install --startup auto && net start FTPSimpleService"'
+            target = "cmd.exe"
         elif action == "remove":
             if getattr(sys, 'frozen', False):
-                remove_cmd = f'"{exe_path}" remove'
+                args = f'{cmd_switch} "net stop FTPSimpleService & "{exe_path}" remove"'
             else:
-                remove_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
-
-            bat_content = f'''@echo off
-echo ====== 停止服务 ====== > "{svc_log}"
-net stop FTPSimpleService >> "{svc_log}" 2>&1
-echo. >> "{svc_log}"
-echo ====== 卸载服务 ====== >> "{svc_log}"
-{remove_cmd} >> "{svc_log}" 2>&1
-'''
+                args = f'{cmd_switch} "net stop FTPSimpleService & "{exe_path}" "{os.path.abspath(__file__)}" remove"'
+            target = "cmd.exe"
         else:
-            return
-
-        # 写入 bat 文件
-        try:
-            with open(bat_path, 'w', encoding='gbk') as f:
-                f.write(bat_content)
-        except Exception as e:
-            self.log_message(f"写入脚本文件失败: {e}")
-            return
+            target = exe_path
+            args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
 
         try:
-            # 提权执行 bat 文件，nShowCmd=1 让窗口可见
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat_path, None, None, 1)
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 1)
             if ret > 32:
                 if action == "install":
                     self.log_message("已申请管理员权限安装服务，请查看弹出的命令行窗口...")
                     self._register_gui_startup(True)
                 elif action == "remove":
                     self.log_message("已申请管理员权限卸载服务...")
-                # 延迟读取日志并刷新状态
-                self.root.after(6000, lambda: self._read_svc_log(svc_log))
                 self.root.after(6000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
@@ -1145,11 +1118,15 @@ def main():
     2. SCM 启动 (无参数，但 StartServiceCtrlDispatcher 成功) → 后台服务
     3. 用户双击 (无参数，StartServiceCtrlDispatcher 失败) → GUI
     """
+    # 防止无控制台模式下（PyInstaller -w），服务安装模块内部 print 导致崩溃
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, 'w')
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, 'w')
+
     # 模式 1: 带参数启动，处理 install/remove/start/stop 等服务管理命令
     if len(sys.argv) > 1 and win32serviceutil is not None:
-        # NOTE: 必须显式传 serviceClassString，否则 pywin32 会尝试读取 __file__
-        # 在 PyInstaller 打包环境中 __file__ 指向临时解压目录，导致安装失败
-        win32serviceutil.HandleCommandLine(FTPSysService, serviceClassString='main.FTPSysService')
+        win32serviceutil.HandleCommandLine(FTPSysService)
         return
 
     # 模式 2 & 3: 无参数启动，尝试作为服务连接 SCM

@@ -824,20 +824,33 @@ echo =======================================================
 echo               FTP Simple Server 服务安装
 echo =======================================================
 echo.
-echo [1/2] 正在安装服务...
+echo [1/3] 正在注册基础服务...
 echo   执行命令: {install_cmd}
 {install_cmd} > "{svc_log}" 2>&1
 if %errorlevel% neq 0 (
     echo   [!] 安装服务失败，错误码 %errorlevel% 
 ) else (
-    echo   [ok] 安装服务成功
+    echo   [ok] 注册成功
 )
 
 echo.
-echo [2/2] 正在启动服务...
+echo [2/3] 正在强制修复可执行路径...
+:: ！！这是解决 PyInstaller 各种奇葩拼接导致"找不到指定文件"的终极手段！！
+:: 直接使用 Windows 原生 SC 命令硬写入绝对路径到 ImagePath
+sc config FTPSimpleService binPath= "\\"{exe_path}\\"" >> "{svc_log}" 2>&1
+if %errorlevel% neq 0 (
+    echo   [!] 修复路径失败，错误码 %errorlevel% 
+) else (
+    echo   [ok] 路径修复成功
+)
+
+echo.
+echo [3/3] 正在启动服务...
 net start FTPSimpleService >> "{svc_log}" 2>&1
 if %errorlevel% neq 0 (
     echo   [!] 启动服务失败，错误码 %errorlevel% 
+    echo   -- 附加诊断信息 -- >> "{svc_log}" 2>&1
+    sc qc FTPSimpleService >> "{svc_log}" 2>&1
 ) else (
     echo   [ok] 启动服务成功
 )
@@ -1088,8 +1101,8 @@ class FTPSysService(BaseService):
     # 关键：PyInstaller 打包后必须指定自身 exe 作为服务二进制
     if getattr(sys, 'frozen', False):
         _exe_name_ = sys.executable
-        # 为了避免 pywin32 默认寻找基于脚本的路径，使用自定义标志绕过默认拼接
-        _exe_args_ = '"' + sys.executable + '"'
+        # 置空即可。因为上面 BAT 脚本中我们会用 `sc config` 最终兜底覆写完整、干净的路径。
+        _exe_args_ = ""
 
     def __init__(self, args):
         if win32serviceutil:

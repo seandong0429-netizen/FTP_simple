@@ -787,53 +787,73 @@ class FTPApp:
             self.log_message(f"防火墙配置失败 (可能由于非管理员权限运行): {e}")
 
     def manage_system_service(self, action):
-        """以管理员身份安装或卸载 Windows 服务（自动启动 + 立即运行）"""
+        """以管理员身份安装或卸载 Windows 服务"""
         import ctypes
         self.save_config()
 
         exe_path = sys.executable
-        # 日志文件：记录提权命令的输出便于排错
         log_dir = os.path.join(os.environ.get('PROGRAMDATA', 'C:\\ProgramData'), 'FTP_Simple_Server')
+        os.makedirs(log_dir, exist_ok=True)
         svc_log = os.path.join(log_dir, 'service_install.log')
+        bat_path = os.path.join(log_dir, 'svc_action.bat')
 
         if action == "install":
-            # 安装服务前先停止 GUI 内的 FTP（避免端口冲突）
             if self.is_running:
                 self.ftp_server.stop_service()
                 self.is_running = False
                 self.btn_start.configure(text="启动服务")
 
             if getattr(sys, 'frozen', False):
-                cmd = f'"{exe_path}" install --startup auto'
+                install_cmd = f'"{exe_path}" install --startup auto'
             else:
-                cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
-            # NOTE: cmd /c 的引号剥离特性——当命令首尾都有双引号时会剥掉最外层
-            # 解决方案：用一层最外双引号包裹整个命令
-            args = f'/c "({cmd} && net start FTPSimpleService) > "{svc_log}" 2>&1"'
-            target = "cmd.exe"
+                install_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" install --startup auto'
+
+            # 写入 bat 文件，每条命令独立一行，彻底避免 cmd /c 引号地狱
+            bat_content = f'''@echo off
+echo ====== 安装服务 ====== > "{svc_log}"
+{install_cmd} >> "{svc_log}" 2>&1
+echo. >> "{svc_log}"
+echo ====== 启动服务 ====== >> "{svc_log}"
+net start FTPSimpleService >> "{svc_log}" 2>&1
+echo. >> "{svc_log}"
+echo EXIT_CODE:%errorlevel% >> "{svc_log}"
+'''
         elif action == "remove":
             if getattr(sys, 'frozen', False):
-                cmd = f'"{exe_path}" remove'
+                remove_cmd = f'"{exe_path}" remove'
             else:
-                cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
-            args = f'/c "(net stop FTPSimpleService & {cmd}) > "{svc_log}" 2>&1"'
-            target = "cmd.exe"
+                remove_cmd = f'"{exe_path}" "{os.path.abspath(__file__)}" remove'
+
+            bat_content = f'''@echo off
+echo ====== 停止服务 ====== > "{svc_log}"
+net stop FTPSimpleService >> "{svc_log}" 2>&1
+echo. >> "{svc_log}"
+echo ====== 卸载服务 ====== >> "{svc_log}"
+{remove_cmd} >> "{svc_log}" 2>&1
+'''
         else:
-            target = exe_path
-            args = action if getattr(sys, 'frozen', False) else f'"{os.path.abspath(__file__)}" {action}'
+            return
+
+        # 写入 bat 文件
+        try:
+            with open(bat_path, 'w', encoding='gbk') as f:
+                f.write(bat_content)
+        except Exception as e:
+            self.log_message(f"写入脚本文件失败: {e}")
+            return
 
         try:
-            # nShowCmd=1 让 cmd 窗口可见，方便用户看到 UAC 后的执行情况
-            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", target, args, None, 1)
+            # 提权执行 bat 文件，nShowCmd=1 让窗口可见
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", bat_path, None, None, 1)
             if ret > 32:
                 if action == "install":
-                    self.log_message("已申请管理员权限安装服务，请在弹出的命令行窗口中查看结果...")
+                    self.log_message("已申请管理员权限安装服务，请查看弹出的命令行窗口...")
                     self._register_gui_startup(True)
                 elif action == "remove":
                     self.log_message("已申请管理员权限卸载服务...")
-                # 延迟读取日志文件并刷新状态
-                self.root.after(5000, lambda: self._read_svc_log(svc_log))
-                self.root.after(5000, self._refresh_service_status)
+                # 延迟读取日志并刷新状态
+                self.root.after(6000, lambda: self._read_svc_log(svc_log))
+                self.root.after(6000, self._refresh_service_status)
             else:
                 self.log_message(f"服务提权操作失败，返回码: {ret}")
         except Exception as e:

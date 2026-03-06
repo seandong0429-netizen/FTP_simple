@@ -563,11 +563,15 @@ class FTPApp:
             btn.pack_forget()
 
         if status is None:
-            # 未安装：显示 ⚪ 未安装，仅保留安装按钮
+            # 未安装：显示 ⚪ 未安装，提供全套维护按钮
             self.svc_status_label.config(text="⚪ 未安装", fg="gray")
             self.status_var.set("状态: 常驻服务未安装")
+            # 在这种完全失常（SC配置失败退回None）的边缘状态下，用户可能需要强制启动或彻底卸载重装
+            self.btn_start_svc.pack(fill=tk.X, pady=2)
+            self.btn_remove_svc.pack(fill=tk.X, pady=2)
             self.btn_install_svc.pack(fill=tk.X, pady=2)
             self._last_svc_running = False
+            
         elif status == 'running':
             # 运行中：🟢 显示绿色字体，保留停止、卸载按钮
             self.svc_status_label.config(text="🟢 服务运行中", fg="green")
@@ -579,17 +583,17 @@ class FTPApp:
             if not getattr(self, '_last_svc_running', False):
                 self._print_service_access_log()
             self._last_svc_running = True
+            
         else:
-            # 已停止：🔴 显示红色字体，保留启动、卸载按钮
+            # 已停止：🔴 显示红色字体，保留启动、卸载按钮，外加覆盖安装按钮
             self.svc_status_label.config(text="🔴 服务已停止", fg="red")
             self.status_var.set("状态: 常驻服务已停止")
             self.btn_start_svc.pack(fill=tk.X, pady=2)
             self.btn_remove_svc.pack(fill=tk.X, pady=2)
-            # 用户可能需要覆盖安装，虽然是停止状态，也允许点击安装服务
             self.btn_install_svc.pack(fill=tk.X, pady=2)
             self._last_svc_running = False
             
-        # 无论什么状态都把刷新按钮放最底下
+        # 无论什么状态，刷新按钮都作为最后一个 pack 元素放到最底下
         self.btn_refresh_svc.pack(fill=tk.X, pady=2)
 
     def _get_service_status(self):

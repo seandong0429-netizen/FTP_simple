@@ -316,7 +316,7 @@ class FTPApp:
         self._apply_mode_ui()
 
         # 启动时主动检测后台服务状态，避免 GUI 与服务状态割裂
-        if self._is_service_running():
+        if self._get_service_status() == 'running':
             self.status_var.set("状态: 后台服务运行中")
             self.btn_start.configure(text="后台服务运行中", state='disabled')
             self.log_message("检测到 Windows 后台服务正在运行，FTP 已通过服务提供。如需修改配置，请切换到常驻模式管理。")

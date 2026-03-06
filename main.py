@@ -834,14 +834,18 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [2/3] 正在强制修复可执行路径...
-:: ！！这是解决 PyInstaller 各种奇葩拼接导致"找不到指定文件"的终极手段！！
-:: 直接使用 Windows 原生 SC 命令硬写入绝对路径到 ImagePath
+echo [2/3] 正在配置服务运行参数...
+:: 1. 强制写入绝对路径到 ImagePath（解决 PyInstaller "找不到文件"的奇葩 bug）
 sc config FTPSimpleService binPath= "\\"{exe_path}\\"" >> "{svc_log}" 2>&1
+:: 2. 设置为自动延迟启动，防止开机时网络未就绪导致启动失败崩溃
+sc config FTPSimpleService start= delayed-auto >> "{svc_log}" 2>&1
+:: 3. 添加网络和底层依赖，确保网卡就绪后再运行
+sc config FTPSimpleService depend= Tcpip/WlanSvc/Afd >> "{svc_log}" 2>&1
+
 if %errorlevel% neq 0 (
-    echo   [!] 修复路径失败，错误码 %errorlevel% 
+    echo   [!] 服务配置失败，错误码 %errorlevel% 
 ) else (
-    echo   [ok] 路径修复成功
+    echo   [ok] 服务配置成功
 )
 
 echo.
